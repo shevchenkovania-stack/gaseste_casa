@@ -1,0 +1,25 @@
+# credentials — never commit
+ACCESS.md
+*.vps
+.vps.env
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# secrets / local env
+.env
+!.env.example
+
+# data
+*.db
+*.db-wal
+*.db-shm
+photos/
+
+# editor / os
+.idea/
+.vscode/
+.DS_Store
