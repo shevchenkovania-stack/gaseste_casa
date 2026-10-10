@@ -29,6 +29,19 @@ BOOST_MDL = int(os.getenv("BOOST_MDL", "0"))
 # Recipient details shown to the buyer, e.g. "card 5199 xxxx xxxx xxxx, maib, Ivan P."
 PAY_INFO = os.getenv("PAY_INFO", "").strip()
 
+# Rail 3: real card payment (Visa/Mastercard) through Lemon Squeezy as merchant of record.
+# Stripe does not issue merchant accounts in Moldova and local acquiring needs a legal entity;
+# LS lists Moldova as a supported bank-payout country and handles VAT/chargebacks itself.
+LS_API_KEY = os.getenv("LS_API_KEY", "").strip()
+LS_STORE_ID = os.getenv("LS_STORE_ID", "").strip()
+LS_VARIANT_ID = os.getenv("LS_VARIANT_ID", "").strip()
+# Signing secret from LS Settings -> Webhooks; the X-Signature header is HMAC-SHA256 of the raw body.
+LS_WEBHOOK_SECRET = os.getenv("LS_WEBHOOK_SECRET", "").strip()
+# Price of one Boost in US cents on the LS checkout (store currency). 500 = $5.00 ~ 90 MDL.
+CARD_PRICE_CENTS = int(os.getenv("CARD_PRICE_CENTS", "500"))
+# Button appears only when the store is actually wired up; webhook needs the secret too.
+CARD_ENABLED = bool(LS_API_KEY and LS_STORE_ID and LS_VARIANT_ID)
+
 # Revenue loop: remind owners of unboosted active listings to buy a Boost.
 NUDGE_AFTER_DAYS = int(os.getenv("NUDGE_AFTER_DAYS", "2"))
 NUDGE_COOLDOWN_DAYS = int(os.getenv("NUDGE_COOLDOWN_DAYS", "4"))

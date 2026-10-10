@@ -1,8 +1,9 @@
 """Create one DEMO listing owned by the admin and send him the real Boost offer.
 
-Purpose: let the owner of the bot press the pay button once and verify the whole
-Telegram Stars chain (invoice -> successful_payment -> boost -> admin report).
-The demo listing is NOT posted to the public channel and is clearly marked.
+Purpose: let the owner of the bot press a pay button once and verify a whole rail end to end
+(card checkout -> webhook -> boost, or Stars invoice -> successful_payment, or manual transfer),
+including the boost credit and the admin report. The demo listing is NOT posted to the public
+channel and is clearly marked.
 
 Run: cd /opt/imobiliare/bot && /opt/imobiliare/venv/bin/python /tmp/make_demo.py
 """
@@ -51,13 +52,9 @@ async def main() -> None:
         f"\U0001F680 <b>Boost объявления #{listing_id}</b> (ДЕМО)\n\n"
         "Это тестовая карточка: нажми кнопку ниже и проверь кассу от и до — "
         "начисление Boost и отчёт себе как админу.\n\n"
-        f"• Переводом: <b>{config.BOOST_MDL} MDL</b> — «\U0001F4B0 Переводом» → «Я перевёл» → "
-        "подтверждение админом (работает без карты и без эквайринга)\n"
-        f"• Telegram Stars: <b>{config.BOOST_STARS} Stars</b> \u2B50 (нужна карта, привязанная к Telegram)"
+        + keyboards.boost_pitch()
     )
-    await bot.send_message(ADMIN_TG, text,
-                           reply_markup=keyboards.boost_kb(listing_id, config.BOOST_STARS,
-                                                           config.BOOST_DAYS, config.BOOST_MDL))
+    await bot.send_message(ADMIN_TG, text, reply_markup=keyboards.boost_kb(listing_id))
     print("demo listing:", listing_id, "| offer sent to", ADMIN_TG)
 
     await db.close_db()

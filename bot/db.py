@@ -73,6 +73,22 @@ CREATE TABLE IF NOT EXISTS events (
     meta TEXT,
     created_at TEXT DEFAULT (datetime('now'))
 );
+
+-- Inbox for card payments: the webhook (webapp process) only stores what the provider told us,
+-- the bot process applies money/boost logic (single writer, idempotent by order id).
+CREATE TABLE IF NOT EXISTS card_orders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id TEXT UNIQUE NOT NULL,
+    listing_id INTEGER,
+    tg_id INTEGER,
+    amount_cents INTEGER NOT NULL,
+    currency TEXT NOT NULL,
+    status TEXT NOT NULL,
+    test_mode INTEGER NOT NULL DEFAULT 0,
+    customer TEXT,
+    applied INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now'))
+);
 """
 
 
@@ -100,6 +116,9 @@ async def _migrate() -> None:
     if "amount" not in cols:
         # manual bank transfers are priced in real MDL, not Stars
         await _conn.execute("ALTER TABLE payments ADD COLUMN amount REAL")
+    if "is_test" not in cols:
+        # provider test-mode orders are real rows but never real revenue
+        await _conn.execute("ALTER TABLE payments ADD COLUMN is_test INTEGER NOT NULL DEFAULT 0")
 
 
 async def close_db() -> None:
@@ -107,6 +126,16 @@ async def close_db() -> None:
     if _conn is not None:
         await _conn.close()
         _conn = None
+
+
+async def ensure_schema(conn: aiosqlite.Connection) -> None:
+    """Create tables on a foreign connection.
+
+    The Mini App process writes the card payment inbox, so it must not depend on the bot
+    having created the schema first. All statements are IF NOT EXISTS -> safe to re-run.
+    """
+    await conn.executescript(SCHEMA)
+    await conn.commit()
 
 
 def _db() -> aiosqlite.Connection:
@@ -143,6 +172,12 @@ async def set_user_phone(user_id: int, phone: str) -> None:
 
 async def get_user_by_id(user_id: int) -> aiosqlite.Row | None:
     cur = await _db().execute("SELECT * FROM users WHERE id = ?", (user_id,))
+    return await cur.fetchone()
+
+
+async def get_user_by_tg_id(tg_id: int) -> aiosqlite.Row | None:
+    """Lookup without touching username/first_name (get_or_create_user would overwrite them)."""
+    cur = await _db().execute("SELECT * FROM users WHERE tg_id = ?", (tg_id,))
     return await cur.fetchone()
 
 
@@ -328,15 +363,55 @@ async def set_boost_status(boost_id: int, status: str) -> None:
 
 
 async def log_payment(user_id: int, listing_id: int | None, purpose: str, stars: int,
-                      currency: str, telegram_charge_id: str, provider_charge_id: str | None,
-                      amount: float | None = None) -> None:
+                      currency: str, telegram_charge_id: str | None, provider_charge_id: str | None,
+                      amount: float | None = None, is_test: bool = False) -> None:
     db = _db()
     await db.execute(
         """INSERT INTO payments
-           (user_id, listing_id, purpose, stars, currency, telegram_charge_id, provider_charge_id, amount)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-        (user_id, listing_id, purpose, stars, currency, telegram_charge_id, provider_charge_id, amount),
+           (user_id, listing_id, purpose, stars, currency, telegram_charge_id, provider_charge_id, amount, is_test)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (user_id, listing_id, purpose, stars, currency, telegram_charge_id, provider_charge_id,
+         amount, 1 if is_test else 0),
     )
+    await db.commit()
+
+
+async def store_card_order(conn: aiosqlite.Connection, order: dict) -> bool:
+    """Save one provider order event on the given connection. True when the order id is new.
+
+    Called by the Mini App process (it owns the webhook); the bot process reads the rows and
+    applies them, so only one writer ever touches money. Duplicate deliveries only move the
+    status forward and never create a second row -> a paid order cannot be credited twice.
+    """
+    try:
+        await conn.execute(
+            """INSERT INTO card_orders (order_id, listing_id, tg_id, amount_cents,
+                                        currency, status, test_mode, customer)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (order["order_id"], order.get("listing_id"), order.get("tg_id"), order["amount_cents"],
+             order["currency"], order["status"], 1 if order.get("test_mode") else 0,
+             order.get("customer")),
+        )
+        await conn.commit()
+        return True
+    except aiosqlite.IntegrityError:
+        await conn.execute("UPDATE card_orders SET status = ? WHERE order_id = ?",
+                           (order["status"], order["order_id"]))
+        await conn.commit()
+        return False
+
+
+async def card_orders_to_apply(limit: int = 20):
+    q = """SELECT * FROM card_orders
+           WHERE applied = 0 AND status = 'paid' AND listing_id IS NOT NULL
+           ORDER BY id LIMIT ?"""
+    cur = await _db().execute(q, (limit,))
+    return await cur.fetchall()
+
+
+async def mark_card_order_applied(row_id: int) -> None:
+    db = _db()
+    await db.execute("UPDATE card_orders SET applied = 1 WHERE id = ?", (row_id,))
     await db.commit()
 
 
@@ -359,10 +434,14 @@ async def stats() -> dict:
         "pending": "SELECT COUNT(*) c FROM listings WHERE status='pending'",
         "boosts": "SELECT COUNT(*) c FROM boosts WHERE status IN ('paid','manual')",
         "payments": "SELECT COUNT(*) c FROM payments",
-        # REAL_REVENUE must stay honest: XTEST test invoices are excluded
-        "revenue_stars": "SELECT COALESCE(SUM(stars),0) c FROM payments WHERE currency='XTR'",
-        "revenue_mdl": "SELECT COALESCE(SUM(amount),0) c FROM payments WHERE currency='MDL'",
-        "test_payments": "SELECT COUNT(*) c FROM payments WHERE currency = 'XTEST'",
+        # REAL_REVENUE must stay honest: test invoices and provider test-mode orders excluded
+        "revenue_stars": "SELECT COALESCE(SUM(stars),0) c FROM payments WHERE currency='XTR' AND is_test=0",
+        "revenue_mdl": "SELECT COALESCE(SUM(amount),0) c FROM payments WHERE currency='MDL' AND is_test=0",
+        # card rail is priced in the store currency (USD), keep it on its own line
+        "revenue_card": "SELECT COALESCE(SUM(amount),0) c FROM payments "
+                        "WHERE currency NOT IN ('XTR','MDL','XTEST') AND is_test=0",
+        "card_unapplied": "SELECT COUNT(*) c FROM card_orders WHERE applied = 0 AND status='paid'",
+        "test_payments": "SELECT COUNT(*) c FROM payments WHERE currency = 'XTEST' OR is_test = 1",
     }.items():
         cur = await db.execute(q)
         row = await cur.fetchone()

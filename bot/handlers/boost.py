@@ -1,9 +1,14 @@
+import logging
+
 from aiogram import Bot, F, Router
 from aiogram.types import CallbackQuery, LabeledPrice, Message, PreCheckoutQuery
 
 import config
 import db
 import keyboards
+import lemon
+
+log = logging.getLogger("chiriebot.boost")
 
 router = Router()
 
@@ -19,26 +24,17 @@ async def offer_flow(target: Message, from_user, listing_id: int) -> None:
         await target.answer("Поднять можно только своё объявление.")
         return
     await db.log_event("boost_click", user_id=user["id"], listing_id=listing_id)
-    if config.BOOST_MDL:
-        text = (
-            f"\U0001F680 <b>Boost объявления #{listing_id}</b>\n\n"
-            f"Твоё объявление будет показываться <b>первым</b> в поиске и выделяться \u2B50 "
-            f"в течение <b>{config.BOOST_DAYS} дней</b>.\n\n"
-            f"\U0001F4B0 Переводом: <b>{config.BOOST_MDL} MDL</b> на карту — кнопка ниже, "
-            "подтверждаем вручную за несколько минут.\n"
-            f"\u2B50 Или {config.BOOST_STARS} Telegram Stars (нужны уже купленные звёзды)."
-        )
-    else:
-        text = (
-            f"\U0001F680 <b>Boost объявления #{listing_id}</b>\n\n"
-            f"Твоё объявление будет показываться <b>первым</b> в поиске и выделяться \u2B50 "
-            f"в течение <b>{config.BOOST_DAYS} дней</b>.\n\n"
-            f"Стоимость: <b>{config.BOOST_STARS} Telegram Stars</b> \u2B50\n"
-            "Оплата проходит внутри Telegram, безопасно."
-        )
-    await target.answer(text, parse_mode="HTML",
-                        reply_markup=keyboards.boost_kb(listing_id, config.BOOST_STARS,
-                                                        config.BOOST_DAYS, config.BOOST_MDL))
+    note = ""
+    if config.CARD_ENABLED:
+        note = ("\n\nКартой — оплата на защищённой странице банка, Boost включается сам, "
+                "подтверждение менеджером не нужно.")
+    text = (
+        f"\U0001F680 <b>Boost объявления #{listing_id}</b>\n\n"
+        f"Твоё объявление будет показываться <b>первым</b> в поиске и выделяться \u2B50 "
+        f"в течение <b>{config.BOOST_DAYS} дней</b>.\n\n"
+        + keyboards.boost_pitch() + note
+    )
+    await target.answer(text, parse_mode="HTML", reply_markup=keyboards.boost_kb(listing_id))
 
 
 @router.callback_query(F.data.startswith("boost:"))
@@ -74,6 +70,43 @@ async def boost_pay(cb: CallbackQuery, bot: Bot) -> None:
 @router.pre_checkout_query()
 async def pre_checkout(q: PreCheckoutQuery) -> None:
     await q.answer(ok=True)
+
+
+@router.callback_query(F.data.startswith("card:"))
+async def card_offer(cb: CallbackQuery) -> None:
+    """Rail 3: hosted card checkout. Lemon Squeezy is the merchant of record, we only get told."""
+    listing_id = int(cb.data.split(":", 1)[1])
+    await cb.answer()
+    if not config.CARD_ENABLED:
+        await cb.message.answer("Оплата картой сейчас недоступна.")
+        return
+    row = await db.get_listing(listing_id)
+    if not row:
+        await cb.message.answer("Объявление не найдено.")
+        return
+    user = await db.get_or_create_user(cb.from_user.id, cb.from_user.username, cb.from_user.first_name)
+    if row["user_id"] != user["id"]:
+        await cb.message.answer("Поднять можно только своё объявление.")
+        return
+    await db.log_event("card_click", user_id=user["id"], listing_id=listing_id)
+    try:
+        checkout_id, url = await lemon.create_checkout(listing_id, cb.from_user.id)
+    except Exception as e:
+        log.warning("LS checkout failed for #%s: %s", listing_id, e)
+        await cb.message.answer("Платёжная страница временно недоступна — попробуй перевод MDL "
+                                "или Stars \u2B50, или напиши в поддержку.")
+        return
+    await db.log_event("card_checkout", user_id=user["id"], listing_id=listing_id, meta=checkout_id)
+    await cb.message.answer(
+        f"\U0001F4B3 <b>Оплата картой {keyboards.usd(config.CARD_PRICE_CENTS)}</b> "
+        f"(объявление #{listing_id}, {config.BOOST_DAYS} дней в топе)\n\n"
+        "1. Нажми кнопку \u2014 откроется защищённая страница оплаты Visa/Mastercard.\n"
+        "2. После оплаты бот <b>сам</b> поднимет объявление и напишет сюда \u2014 ничего "
+        "подтверждать вручную не нужно.\n\n"
+        "Ссылка одноразовая, действует 3 часа.",
+        parse_mode="HTML",
+        reply_markup=keyboards.card_pay_kb(url, listing_id),
+    )
 
 
 @router.callback_query(F.data.startswith("manual:"))

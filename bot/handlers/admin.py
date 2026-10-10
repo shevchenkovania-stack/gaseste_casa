@@ -119,8 +119,9 @@ async def stats(message: Message) -> None:
         f"Объявлений: {s['listings']} (активных {s['active']}, на модерации {s['pending']})\n"
         f"Boost'ов: {s['boosts']}\n"
         f"Платежей: {s['payments']} (тестовых: {s['test_payments']})\n"
-        f"REAL_REVENUE Stars \u2B50: <b>{s['revenue_stars']}</b>\n"
-        f"REAL_REVENUE MDL \U0001F4B0: <b>{s['revenue_mdl']}</b>"
+        f"REAL_REVENUE Картой 💳: <b>{s['revenue_card']:.2f}</b> (не применено карточных заказов: {s['card_unapplied']})\n"
+        f"REAL_REVENUE MDL \U0001F4B0: <b>{s['revenue_mdl']}</b>\n"
+        f"REAL_REVENUE Stars \u2B50: <b>{s['revenue_stars']}</b>"
     )
     await message.answer(text, parse_mode="HTML")
 

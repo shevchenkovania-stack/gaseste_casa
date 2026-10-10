@@ -1,11 +1,13 @@
-"""ChirieBot Mini App backend: read-only listings API + static frontend.
+"""ChirieBot Mini App backend: read-only listings API + static frontend + payment webhook.
 
 Runs as separate systemd service (webapp.service), proxied by nginx.
-DB access is read-only except view/contact counters.
+DB access is read-only except view/contact counters and the card payment inbox
+(card_orders): the provider webhook stores the order here, the bot process applies it.
 """
 import hashlib
 import hmac
 import json
+import logging
 import os
 import sys
 import time
@@ -16,6 +18,10 @@ from aiohttp import web
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
+import db
+import lemon
+
+log = logging.getLogger("chiriebot.webapp")
 
 DB_PATH = config.DB_PATH
 PHOTOS_DIR = config.PHOTOS_DIR
@@ -162,23 +168,50 @@ async def api_stats(request: web.Request) -> web.Response:
     return web.json_response({"active": (await cur.fetchone())["c"]})
 
 
+async def webhook_lemonsqueezy(request: web.Request) -> web.Response:
+    """Card payment inbox. No init-data auth: the HMAC signature of the raw body is the proof.
+
+    Only stores what the provider reported. 200 on ignored events, otherwise Lemon Squeezy
+    retries the delivery three more times.
+    """
+    raw = await request.read()
+    if not lemon.verify_signature(raw, request.headers.get("X-Signature", "")):
+        log.warning("LS webhook rejected: bad signature (%s bytes)", len(raw))
+        return web.json_response({"error": "invalid_signature"}, status=401)
+    try:
+        event = json.loads(raw)
+    except ValueError:
+        return web.json_response({"error": "bad_json"}, status=400)
+    order = lemon.parse_order_event(event)
+    if not order:
+        return web.json_response({"ok": True, "ignored": True})
+    fresh = await db.store_card_order(request.app["db"], order)
+    log.info("LS order %s: %s %s listing=%s status=%s new=%s", order["order_id"],
+             order["amount_cents"], order["currency"], order["listing_id"],
+             order["status"], fresh)
+    return web.json_response({"ok": True, "recorded": fresh})
+
+
 # ---------- lifecycle ----------
 
 async def app_factory() -> web.Application:
     app = web.Application()
-    db = await aiosqlite.connect(f"file:{DB_PATH}?mode=rw", uri=True)
-    db.row_factory = aiosqlite.Row
-    await db.execute("PRAGMA busy_timeout=5000")
-    app["db"] = db
+    conn = await aiosqlite.connect(f"file:{DB_PATH}?mode=rw", uri=True)
+    conn.row_factory = aiosqlite.Row
+    await conn.execute("PRAGMA busy_timeout=5000")
+    await db.ensure_schema(conn)  # card_orders must exist even if the bot restarts later
+    app["db"] = conn
     app.router.add_get("/", index)
     app.router.add_get("/api/listings", api_listings)
     app.router.add_get("/api/listing/{id}", api_listing)
     app.router.add_post("/api/listing/{id}/contact", api_contact)
     app.router.add_get("/api/stats", api_stats)
+    app.router.add_post("/webhook/lemonsqueezy", webhook_lemonsqueezy)
     os.makedirs(PHOTOS_DIR, exist_ok=True)
     app.router.add_static("/photos/", PHOTOS_DIR)
     return app
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     web.run_app(app_factory(), host="127.0.0.1", port=8085)

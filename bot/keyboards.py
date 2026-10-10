@@ -82,15 +82,52 @@ def listing_kb(listing_id: int, owner: bool, boosted: bool) -> InlineKeyboardMar
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def boost_kb(listing_id: int, stars: int, days: int, mdl: int = 0) -> InlineKeyboardMarkup:
+def usd(cents: int) -> str:
+    """Price label for the card rail (Lemon Squeezy store currency is USD)."""
+    return f"${cents / 100:.2f}"
+
+
+def rails_line() -> str:
+    """Payment options in one line: '$5.00 💳 картой / 100 MDL 💰 переводом / 50 Stars ⭐'."""
+    opts = []
+    if config.CARD_ENABLED:
+        opts.append(f"{usd(config.CARD_PRICE_CENTS)} \U0001F4B3 картой")
+    if config.BOOST_MDL:
+        opts.append(f"{config.BOOST_MDL} MDL \U0001F4B0 переводом")
+    opts.append(f"{config.BOOST_STARS} Stars \u2B50")
+    return " / ".join(opts)
+
+
+def boost_pitch() -> str:
+    """One sentence with every wired-up payment rail. Single source for all price copy."""
+    return (f"\U0001F680 <b>Boost</b> \u2014 {rails_line()}: объявление поднимается на первое "
+            f"место в поиске на <b>{config.BOOST_DAYS} дней</b>.")
+
+
+def boost_kb(listing_id: int) -> InlineKeyboardMarkup:
+    """All available payment rails, cheapest friction first."""
     rows = []
-    if mdl:
-        # MDL transfer first: many buyers in MD have no card attached to Telegram,
-        # so they cannot buy Stars at all (PROVIDER_ACCOUNT_INVALID).
-        rows.append([InlineKeyboardButton(text=f"\U0001F4B0 Переводом {mdl} MDL", callback_data=f"manual:{listing_id}")])
-    rows.append([InlineKeyboardButton(text=f"\u2B50 Оплатить {stars} Stars", callback_data=f"boostpay:{listing_id}")])
+    if config.CARD_ENABLED:
+        # hosted checkout: no card attached to Telegram and no acquiring contract needed
+        rows.append([InlineKeyboardButton(text=f"\U0001F4B3 Картой {usd(config.CARD_PRICE_CENTS)}",
+                                          callback_data=f"card:{listing_id}")])
+    if config.BOOST_MDL:
+        # manual transfer: many sellers in MD have no card attached to Telegram, so they
+        # cannot buy Stars at all (PROVIDER_ACCOUNT_INVALID)
+        rows.append([InlineKeyboardButton(text=f"\U0001F4B0 Переводом {config.BOOST_MDL} MDL",
+                                          callback_data=f"manual:{listing_id}")])
+    rows.append([InlineKeyboardButton(text=f"\u2B50 Оплатить {config.BOOST_STARS} Stars",
+                                      callback_data=f"boostpay:{listing_id}")])
     rows.append([InlineKeyboardButton(text="\u2b05\uFE0F Назад", callback_data=f"view:{listing_id}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def card_pay_kb(url: str, listing_id: int) -> InlineKeyboardMarkup:
+    """Opens the Lemon Squeezy checkout in the in-app browser."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="\U0001F517 Открыть оплату картой", url=url)],
+        [InlineKeyboardButton(text="\u2b05\uFE0F Назад", callback_data=f"view:{listing_id}")],
+    ])
 
 
 def manual_kb(listing_id: int, mdl: int) -> InlineKeyboardMarkup:

@@ -1,7 +1,8 @@
-"""Periodic jobs. Only one matters for revenue: the Boost nudge.
+"""Periodic jobs. Two matter for revenue: the Boost nudge and the card payment inbox.
 
-Deterministic by design - plain SQL selection + a message with the same
-payment keyboard the owner gets in the bot. No LLM, no heuristics.
+The inbox job is what makes card money real: Lemon Squeezy posts the order to the Mini App
+process, that process only stores it, and here (single writer) it becomes a boost + payment row.
+Deterministic by design - plain SQL, plain arithmetic, no LLM, no heuristics.
 """
 import asyncio
 import logging
@@ -13,6 +14,7 @@ import db
 import keyboards
 
 log = logging.getLogger("chiriebot.scheduler")
+CARD_TICK_SECONDS = 60  # how often the card payment inbox is checked
 
 
 async def nudge_unboosted(bot: Bot) -> int:
@@ -25,25 +27,17 @@ async def nudge_unboosted(bot: Bot) -> int:
             await db.mark_nudged(row["id"])
             continue
         rooms = f"{row['rooms']}-комн. " if row["rooms"] else ""
-        if config.BOOST_MDL:
-            price = (f"\U0001F680 <b>Boost</b> \u2014 {config.BOOST_MDL} MDL переводом на карту "
-                     f"(или {config.BOOST_STARS} Stars \u2B50): объявление поднимается на первое "
-                     f"место в поиске на <b>{config.BOOST_DAYS} дней</b>.")
-        else:
-            price = (f"\U0001F680 <b>Boost</b> \u2014 {config.BOOST_STARS} Stars \u2B50: объявление "
-                     f"поднимается на первое место в поиске на <b>{config.BOOST_DAYS} дней</b>.")
         text = (
             f"\u23F3 Твоё объявление <b>#{row['id']}</b> "
             f"({rooms}{row['district'] or '—'} \u00B7 {row['price']} {row['currency']}) "
             "в базе, но сейчас не в топе.\n"
             f"Просмотров: <b>{row['views']}</b>\n\n"
-            + price
+            + keyboards.boost_pitch()
         )
         try:
             await bot.send_message(
                 owner["tg_id"], text, parse_mode="HTML",
-                reply_markup=keyboards.boost_kb(row["id"], config.BOOST_STARS,
-                                                config.BOOST_DAYS, config.BOOST_MDL),
+                reply_markup=keyboards.boost_kb(row["id"]),
             )
         except Exception as e:  # blocked / deleted chat: don't retry forever
             log.info("nudge skipped #%s (user %s): %s", row["id"], owner["tg_id"], e)
@@ -53,16 +47,78 @@ async def nudge_unboosted(bot: Bot) -> int:
     return sent
 
 
-async def run(bot: Bot) -> None:
-    """Sleep first, then run the job forever. Exceptions never kill the loop."""
-    delay = config.NUDGE_INTERVAL_HOURS * 3600
-    while True:
-        await asyncio.sleep(delay)
+async def apply_card_orders(bot: Bot) -> int:
+    """Credit Boost for card orders the provider reported as paid.
+
+    The webhook only stores rows; this is the single place where card money becomes a boost.
+    Idempotent by the applied flag, so a restart or a repeated delivery can never pay twice.
+    """
+    applied = 0
+    for row in await db.card_orders_to_apply():
+        listing = await db.get_listing(row["listing_id"])
+        buyer = await db.get_user_by_tg_id(row["tg_id"]) if row["tg_id"] else None
+        if not listing or not buyer:
+            log.warning("card order %s: no listing #%s or user %s, left unapplied",
+                        row["order_id"], row["listing_id"], row["tg_id"])
+            await db.log_event("card_order_unmatched", listing_id=row["listing_id"],
+                               meta=row["order_id"])
+            continue
+        is_test = bool(row["test_mode"])
+        amount = row["amount_cents"] / 100
+        await db.boost_listing(row["listing_id"], config.BOOST_DAYS)
+        await db.log_boost(row["listing_id"], buyer["id"], 0, config.BOOST_DAYS, status="paid")
+        await db.log_payment(user_id=buyer["id"], listing_id=row["listing_id"],
+                             purpose="boost_card_test" if is_test else "boost_card",
+                             stars=0, currency=row["currency"], telegram_charge_id=None,
+                             provider_charge_id=row["order_id"], amount=amount, is_test=is_test)
+        await db.mark_card_order_applied(row["id"])
+        await db.log_event("boost_card_paid", user_id=buyer["id"], listing_id=row["listing_id"],
+                           meta=f"{row['order_id']} {amount} {row['currency']}")
+        tag = "\U0001F9EA Тестовый платёж принят. " if is_test else "\u2705 Оплата картой получена! "
         try:
-            n = await nudge_unboosted(bot)
+            await bot.send_message(
+                buyer["tg_id"],
+                f"{tag}Объявление <b>#{row['listing_id']}</b> поднято в топ на "
+                f"<b>{config.BOOST_DAYS} дней</b> \U0001F680",
+                parse_mode="HTML", reply_markup=keyboards.main_menu(),
+            )
+        except Exception as e:
+            log.info("card notice skipped for %s: %s", buyer["tg_id"], e)
+        for admin in config.ADMIN_IDS:
+            try:
+                await bot.send_message(
+                    admin,
+                    f"\U0001F4B3 <b>Новый платёж</b>\nBoost #{row['listing_id']}: "
+                    f"{amount:.2f} {row['currency']} картой (Lemon Squeezy)"
+                    + ("\n⚠️ тестовый режим — денег по этому заказу нет" if is_test else ""),
+                )
+            except Exception:
+                pass
+        applied += 1
+    return applied
+
+
+async def run(bot: Bot) -> None:
+    """Sleep first, then work forever. Exceptions never kill the loop."""
+    elapsed = 0
+    while True:
+        await asyncio.sleep(CARD_TICK_SECONDS)
+        elapsed += CARD_TICK_SECONDS
+        try:
+            n = await apply_card_orders(bot)
             if n:
-                log.info("boost nudges sent: %s", n)
+                log.info("card boosts applied: %s", n)
         except asyncio.CancelledError:
             raise
         except Exception:
-            log.exception("nudge pass failed")
+            log.exception("card apply pass failed")
+        if elapsed >= config.NUDGE_INTERVAL_HOURS * 3600:
+            elapsed = 0
+            try:
+                n = await nudge_unboosted(bot)
+                if n:
+                    log.info("boost nudges sent: %s", n)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("nudge pass failed")
