@@ -28,16 +28,14 @@ async def download_photos(bot: Bot, row) -> None:
             pass  # missing photo only degrades the web card
 
 
-def contact_kb(row, owner) -> InlineKeyboardMarkup:
-    url = None
-    if row["phone"]:
-        url = f"tel:{row['phone']}"
-    elif owner and owner["username"]:
-        url = f"https://t.me/{owner['username']}"
-    buttons = [[InlineKeyboardButton(text="\U0001F4DE Связаться с владельцем", url=url)]] if url else []
+def contact_kb(row, owner) -> InlineKeyboardMarkup | None:
+    rows = []
+    if owner and owner["username"]:
+        rows.append([InlineKeyboardButton(text="\U0001F4AC Написать в Telegram",
+                                         url=f"https://t.me/{owner['username']}")])
     if config.WEBAPP_URL:
-        buttons.append([InlineKeyboardButton(text="\U0001F50D Смотреть все объекты", url=config.WEBAPP_URL)])
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
+        rows.append([InlineKeyboardButton(text="\U0001F50D Смотреть все объекты", url=config.WEBAPP_URL)])
+    return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
 
 
 async def to_channel(bot: Bot, row) -> None:
@@ -45,6 +43,8 @@ async def to_channel(bot: Bot, row) -> None:
         return
     photos = db.listing_photos(row)[:MAX_PHOTOS]
     caption = render.listing_caption(row)
+    if row["phone"]:
+        caption += f"\n\U0001F4DE {row['phone']}"
     owner = await db.get_user_by_id(row["user_id"])
     kb = contact_kb(row, owner)
     web_photos = [os.path.join(config.PHOTOS_DIR, f"{row['id']}_{i}.jpg")
@@ -54,7 +54,7 @@ async def to_channel(bot: Bot, row) -> None:
         media = [InputMediaPhoto(media=p, caption=caption if i == 0 else None, parse_mode="HTML")
                  for i, p in enumerate(web_photos)]
         await bot.send_media_group(config.CHANNEL_ID, media)
-        await bot.send_message(config.CHANNEL_ID, "↑ details and contact below", reply_markup=kb)
+        await bot.send_message(config.CHANNEL_ID, "↑ контакты и детали ниже", reply_markup=kb)
     else:
         await bot.send_message(config.CHANNEL_ID, caption, parse_mode="HTML", reply_markup=kb)
 
