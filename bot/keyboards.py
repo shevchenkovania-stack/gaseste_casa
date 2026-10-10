@@ -1,5 +1,6 @@
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 
+import config
 from constants import DEAL_LABELS, PTYPE_LABELS
 
 RENT = "\U0001F3E0 Аренда"
@@ -17,6 +18,8 @@ def main_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=MY, callback_data="menu:my")],
         [InlineKeyboardButton(text=HELP, callback_data="menu:help")],
     ]
+    if config.WEBAPP_URL:
+        kb.insert(1, [InlineKeyboardButton(text="\U0001F5FA\uFE0F Открыть приложение", web_app=WebAppInfo(url=config.WEBAPP_URL))])
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 

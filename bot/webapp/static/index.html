@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>ChirieBot — недвижимость Кишинёва</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+:root {
+  --bg: var(--tg-theme-bg-color, #ffffff);
+  --text: var(--tg-theme-text-color, #222);
+  --hint: var(--tg-theme-hint-color, #999);
+  --accent: var(--tg-theme-button-color, #3fa46a);
+  --accent-text: var(--tg-theme-button-text-color, #fff);
+  --card: var(--tg-theme-secondary-bg-color, #f2f2f7);
+  --radius: 14px;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+body { background: var(--bg); color: var(--text); font: 15px/1.4 -apple-system, "Segoe UI", Roboto, sans-serif; padding-bottom: 24px; }
+header { position: sticky; top: 0; z-index: 20; background: var(--bg); padding: 10px 14px 6px; box-shadow: 0 2px 6px rgba(0,0,0,.06); }
+h1 { font-size: 18px; display: flex; justify-content: space-between; align-items: center; }
+h1 .count { font-size: 12px; color: var(--hint); font-weight: 400; }
+.filters { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.chips { display: flex; gap: 8px; overflow-x: auto; }
+.chip { flex: 0 0 auto; padding: 7px 14px; border-radius: 20px; background: var(--card); color: var(--text); border: none; font-size: 13px; cursor: pointer; }
+.chip.on { background: var(--accent); color: var(--accent-text); }
+select, input[type=number] { flex: 1; min-width: 0; padding: 8px 10px; border-radius: 10px; border: 1px solid var(--card); background: var(--bg); color: var(--text); font-size: 14px; }
+.row { display: flex; gap: 8px; }
+.grid { display: flex; flex-direction: column; gap: 12px; padding: 12px 14px; }
+.card { background: var(--card); border-radius: var(--radius); overflow: hidden; cursor: pointer; position: relative; }
+.card img { width: 100%; height: 190px; object-fit: cover; display: block; }
+.card .noimg { width: 100%; height: 110px; display: flex; align-items: center; justify-content: center; color: var(--hint); font-size: 30px; }
+.card .body { padding: 10px 12px 12px; }
+.price { font-size: 18px; font-weight: 700; }
+.price small { font-size: 12px; font-weight: 400; color: var(--hint); }
+.meta { font-size: 13px; color: var(--hint); margin-top: 2px; }
+.badges { position: absolute; top: 8px; left: 8px; display: flex; gap: 6px; }
+.badge { font-size: 11px; padding: 3px 8px; border-radius: 8px; background: rgba(0,0,0,.55); color: #fff; }
+.badge.boost { background: #f5a623; color: #fff; }
+.empty { text-align: center; color: var(--hint); padding: 40px 20px; }
+.empty b { display: block; margin-bottom: 10px; color: var(--text); }
+.btn { display: block; width: 100%; padding: 13px; border: none; border-radius: 12px; background: var(--accent); color: var(--accent-text); font-size: 15px; font-weight: 600; cursor: pointer; text-align: center; }
+.btn.sec { background: var(--card); color: var(--text); margin-top: 8px; }
+/* detail sheet */
+.sheet { position: fixed; inset: 0; z-index: 50; background: var(--bg); overflow-y: auto; transform: translateY(100%); transition: transform .22s ease; }
+.sheet.open { transform: translateY(0); }
+.sheet .top { position: sticky; top: 0; background: var(--bg); padding: 10px 14px; display: flex; align-items: center; gap: 10px; z-index: 2; }
+.sheet .back { border: none; background: none; font-size: 22px; cursor: pointer; color: var(--text); }
+.carousel { display: flex; overflow-x: auto; scroll-snap-type: x mandatory; gap: 0; }
+.carousel img { width: 100%; flex: 0 0 100%; scroll-snap-align: center; height: 260px; object-fit: cover; }
+.detail { padding: 14px; }
+.detail h2 { font-size: 22px; }
+.detail .sub { color: var(--hint); margin: 4px 0 12px; }
+.detail .desc { margin: 12px 0; white-space: pre-wrap; }
+.detail .facts { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 12px 0; }
+.fact { background: var(--card); border-radius: 10px; padding: 10px; font-size: 13px; }
+.fact b { display: block; font-size: 15px; }
+.actions { padding: 0 14px 30px; }
+.contact-info { margin-top: 10px; font-size: 17px; font-weight: 600; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🏠 Недвижимость · Кишинёв <span class="count" id="count"></span></h1>
+  <div class="filters">
+    <div class="chips" id="dealChips">
+      <button class="chip on" data-deal="">Все</button>
+      <button class="chip" data-deal="rent">🏠 Аренда</button>
+      <button class="chip" data-deal="sale">💰 Продажа</button>
+    </div>
+    <div class="row">
+      <select id="district"><option value="">Все районы</option></select>
+      <select id="rooms">
+        <option value="">Комнат: все</option><option value="1">1</option><option value="2">2</option>
+        <option value="3">3</option><option value="4">4</option><option value="5">5+</option>
+      </select>
+      <input type="number" id="priceMax" placeholder="Цена max">
+    </div>
+  </div>
+</header>
+
+<main class="grid" id="grid"></main>
+<div class="empty" id="empty" style="display:none">
+  <b>Здесь пока пусто 😕</b>
+  Размести своё объявление бесплатно — открой бота и нажми «Разместить объект».
+  <div style="margin-top:14px"><button class="btn" onclick="toBot('menu:add')">➕ Разместить объявление</button></div>
+</div>
+<button class="btn sec" id="more" style="display:none; margin:0 14px">Показать ещё</button>
+
+<div class="sheet" id="sheet">
+  <div class="top"><button class="back" onclick="closeSheet()">←</button> <b id="sheetTitle">Объявление</b></div>
+  <div id="sheetBody"></div>
+</div>
+
+<script>
+const tg = window.Telegram?.WebApp;
+tg?.ready(); tg?.expand();
+const INIT = tg?.initData || "";
+const MY_ID = tg?.initDataUnsafe?.user?.id || 0;
+const DISTRICTS = ["Центр","Ботаника","Буюканы","Рышкановка","Чеканы","Дурлешты","Кодры","Стэучень","Кондрица","Бачой","Криково","Сынджера","Тохатин","Бубуечь","Другое"];
+
+const state = { deal:"", district:"", rooms:"", price_max:"", page:1, total:0 };
+const $ = (id) => document.getElementById(id);
+
+async function api(path, opts={}) {
+  const headers = Object.assign({"X-Init-Data": INIT}, opts.headers||{});
+  const r = await fetch(path, Object.assign({headers}, opts));
+  if (!r.ok) throw new Error(r.status);
+  return r.json();
+}
+
+function esc(s){ return (s??"").toString().replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+
+function params() {
+  const p = new URLSearchParams();
+  for (const k of ["deal","district","rooms","price_max"]) if (state[k]) p.set(k, state[k]);
+  p.set("page", state.page);
+  return p.toString();
+}
+
+function cardHtml(it) {
+  const img = it.photos.length ? `<img src="${it.photos[0]}" loading="lazy">` : `<div class="noimg">🏠</div>`;
+  const badges = `<div class="badges">${it.boosted?'<span class="badge boost">🚀 Boost</span>':''}<span class="badge">${esc(it.deal_label)}</span></div>`;
+  const facts = [it.rooms?it.rooms+"к":"", it.area?it.area+" м²":"", it.floor?it.floor+(it.floors?"/"+it.floors:"")+" эт":""].filter(Boolean).join(" · ");
+  return `<div class="card" onclick="openDetail(${it.id})">${badges}${img}
+    <div class="body"><div class="price">${it.price} <small>${esc(it.currency)}/мес</small></div>
+    <div class="meta">${esc(it.ptype_label)} · ${esc(it.district)}${facts?" · "+facts:""}</div></div></div>`;
+}
+
+async function load(append=false) {
+  try {
+    const data = await api("/api/listings?"+params());
+    state.total = data.total;
+    const html = data.items.map(cardHtml).join("");
+    $("grid").insertAdjacentHTML(append ? "beforeend" : "afterbegin", html);
+    if (!append) $("grid").innerHTML = html;
+    $("empty").style.display = data.total ? "none" : "block";
+    $("more").style.display = data.items.length && data.page*data.per < data.total ? "block" : "none";
+  } catch(e) { $("empty").style.display="block"; }
+  const s = await api("/api/stats").catch(()=>({active:0}));
+  $("count").textContent = s.active ? s.active+" объявл." : "";
+}
+
+function toBot(data) { tg?.openTelegram?.({ data }); }
+
+async function openDetail(id) {
+  let it;
+  try { it = await api("/api/listing/"+id); } catch { return; }
+  $("sheetTitle").textContent = `${it.deal_label} · ${it.ptype_label}`;
+  const gal = it.photos.length ? `<div class="carousel">${it.photos.map(p=>`<img src="${p}">`).join("")}</div>` : "";
+  const facts = [
+    it.rooms ? `<div class="fact"><b>${it.rooms}</b>комнат</div>` : "",
+    it.area ? `<div class="fact"><b>${it.area}</b>м²</div>` : "",
+    it.floor ? `<div class="fact"><b>${it.floor}${it.floors?"/"+it.floors:""}</b>этаж</div>` : "",
+    `<div class="fact"><b>${it.views}</b>просмотров</div>`,
+  ].join("");
+  $("sheetBody").innerHTML = `${gal}<div class="detail">
+    <h2>${it.price} <small>${esc(it.currency)}${it.deal==="rent"?"/мес":""}</small> ${it.boosted?'<span class="badge boost" style="position:static">🚀 Boost</span>':''}</h2>
+    <div class="sub">📍 ${esc(it.district)}</div>
+    <div class="facts">${facts}</div>
+    ${it.description?`<div class="desc">${esc(it.description)}</div>`:""}
+  </div>
+  <div class="actions">
+    <button class="btn" id="contactBtn" onclick="revealContact(${it.id})">📞 Связаться с владельцем</button>
+    <div class="contact-info" id="contactInfo"></div>
+    ${it.owner_tg === MY_ID ? `<button class="btn sec" onclick="toBot('/startapp boost:${it.id}')">\u{1F680} Поднять объявление (Boost) — 50 ⭐</button>` : ""}
+    <button class="btn sec" onclick="closeSheet()">← К списку</button>
+  </div>`;
+  $("sheet").classList.add("open");
+  history.scrollRestoration = "manual";
+}
+
+async function revealContact(id) {
+  $("contactBtn").textContent = "…";
+  try {
+    const c = await api(`/api/listing/${id}/contact`, { method: "POST" });
+    let html = "";
+    if (c.phone) html += `<a href="tel:${esc(c.phone)}">${esc(c.phone)}</a>`;
+    if (c.tg) html += (html?" · ":"")+`<a href="${esc(c.tg)}">Telegram</a>`;
+    $("contactInfo").innerHTML = html || "Контакт не указан";
+    $("contactBtn").textContent = "📞 Показать ещё раз";
+  } catch(e) { $("contactBtn").textContent = "📞 Связаться с владельцем"; }
+}
+
+function closeSheet(){ $("sheet").classList.remove("open"); }
+
+// filters wiring
+$("dealChips").addEventListener("click", (e) => {
+  const b = e.target.closest(".chip"); if (!b) return;
+  document.querySelectorAll("#dealChips .chip").forEach(c=>c.classList.remove("on"));
+  b.classList.add("on"); state.deal = b.dataset.deal; state.page = 1; load();
+});
+$("district").innerHTML += DISTRICTS.map(d=>`<option>${d}</option>`).join("");
+["district","rooms","priceMax"].forEach(id => $(id).addEventListener("change", () => {
+  state.district = $("district").value; state.rooms = $("rooms").value;
+  state.price_max = $("priceMax").value; state.page = 1; load();
+}));
+$("more").addEventListener("click", () => { state.page++; load(true); });
+
+if (location.hash.startsWith("#listing=")) openDetail(+location.hash.split("=")[1]);
+load();
+</script>
+</body>
+</html>

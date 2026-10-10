@@ -5,6 +5,7 @@ from aiogram.types import CallbackQuery, Message
 import config
 import db
 import keyboards
+import publish
 
 router = Router()
 
@@ -33,7 +34,12 @@ async def moderate(cb: CallbackQuery, bot: Bot) -> None:
     owner = await db.get_user_by_id(row["user_id"])
     if owner:
         if status == "active":
-            note = f"\u2705 Твоё объявление <b>#{listing_id}</b> одобрено и опубликовано!"
+            note = (f"\u2705 Твоё объявление <b>#{listing_id}</b> одобрено и опубликовано!\n"
+                    "Его уже видят в поиске и в канале. Хочешь быть первым? Жми Boost \U0001F680")
+            try:
+                await publish.publish_listing(bot, row)
+            except Exception:
+                pass  # publishing to channel/webapp must never block moderation
         else:
             note = f"\u274C Твоё объявление <b>#{listing_id}</b> отклонено модератором."
         try:

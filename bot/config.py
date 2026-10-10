@@ -25,5 +25,10 @@ BOOST_DAYS = int(os.getenv("BOOST_DAYS", "7"))
 
 CONTACT_URL = os.getenv("CONTACT_URL", "")
 
+# Public channel where approved listings are auto-posted (@username or -100... chat id)
+CHANNEL_ID = os.getenv("CHANNEL_ID", "").strip() or None
+# HTTPS URL of the Telegram Mini App (webapp/). Empty -> app button hidden.
+WEBAPP_URL = os.getenv("WEBAPP_URL", "").strip()
+
 # Telegram Stars currency code; 1 Star ~= 1 cent. For digital goods inside Telegram.
 STARS_CURRENCY = "XTR"

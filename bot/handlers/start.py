@@ -3,9 +3,11 @@ from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
+import config
 import db
 import keyboards
 from handlers import add as add_h
+from handlers import boost as boost_h
 
 router = Router()
 
@@ -28,6 +30,16 @@ async def cmd_start(message: Message) -> None:
     )
     await db.log_event("start", user_id=u["id"])
     await show_menu(message, message.from_user.first_name)
+
+
+@router.message(F.text.startswith("/startapp boost:"))
+async def deep_boost(message: Message) -> None:
+    """Deep link from the Mini App: /startapp boost:<listing_id>."""
+    try:
+        listing_id = int(message.text.split("boost:", 1)[1].split()[0])
+    except (ValueError, IndexError):
+        return
+    await boost_h.offer_flow(message, message.from_user, listing_id)
 
 
 @router.message(Command("menu"))

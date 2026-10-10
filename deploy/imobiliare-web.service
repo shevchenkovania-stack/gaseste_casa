@@ -1,0 +1,15 @@
+[Unit]
+Description=ChirieBot Mini App (webapp API + static)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/imobiliare/bot
+EnvironmentFile=/opt/imobiliare/bot/.env
+ExecStart=/opt/imobiliare/venv/bin/python webapp/app.py
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target

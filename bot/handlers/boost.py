@@ -8,17 +8,15 @@ import keyboards
 router = Router()
 
 
-@router.callback_query(F.data.startswith("boost:"))
-async def boost_offer(cb: CallbackQuery) -> None:
-    listing_id = int(cb.data.split(":", 1)[1])
+async def offer_flow(target: Message, from_user, listing_id: int) -> None:
+    """Show boost offer. Works for callback messages and /startapp deep links."""
     row = await db.get_listing(listing_id)
-    await cb.answer()
     if not row:
-        await cb.message.answer("Объявление не найдено.")
+        await target.answer("Объявление не найдено.")
         return
-    user = await db.get_or_create_user(cb.from_user.id, cb.from_user.username, cb.from_user.first_name)
+    user = await db.get_or_create_user(from_user.id, from_user.username, from_user.first_name)
     if row["user_id"] != user["id"]:
-        await cb.message.answer("Поднять можно только своё объявление.")
+        await target.answer("Поднять можно только своё объявление.")
         return
     await db.log_event("boost_click", user_id=user["id"], listing_id=listing_id)
     text = (
@@ -28,8 +26,15 @@ async def boost_offer(cb: CallbackQuery) -> None:
         f"Стоимость: <b>{config.BOOST_STARS} Telegram Stars</b> \u2B50\n"
         "Оплата проходит внутри Telegram, безопасно."
     )
-    await cb.message.answer(text, parse_mode="HTML",
-                            reply_markup=keyboards.boost_kb(listing_id, config.BOOST_STARS, config.BOOST_DAYS))
+    await target.answer(text, parse_mode="HTML",
+                        reply_markup=keyboards.boost_kb(listing_id, config.BOOST_STARS, config.BOOST_DAYS))
+
+
+@router.callback_query(F.data.startswith("boost:"))
+async def boost_offer(cb: CallbackQuery) -> None:
+    listing_id = int(cb.data.split(":", 1)[1])
+    await cb.answer()
+    await offer_flow(cb.message, cb.from_user, listing_id)
 
 
 @router.callback_query(F.data.startswith("boostpay:"))
