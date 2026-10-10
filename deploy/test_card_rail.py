@@ -4,7 +4,9 @@ Forges the exact thing LS will send (order_created + HMAC of the raw body), push
 the real production code path and asserts the whole money chain:
   signature -> parse_order_event -> card_orders inbox -> scheduler.apply_card_orders
   -> listing boosted -> payments row (real currency, is_test=0) -> /stats revenue_card
-Dedupe is checked too: a repeated webhook must not pay twice. Everything is deleted afterwards.
+Dedupe is checked too: a repeated webhook must not pay twice. The webhook watchdog is verified as
+pure logic plus one "healthy rail stays silent" pass, so no admin receives a test DM.
+Everything is deleted afterwards.
 
 Run: cd /opt/imobiliare/bot && /opt/imobiliare/venv/bin/python /tmp/test_card_rail.py
 """
@@ -13,6 +15,7 @@ import hashlib
 import hmac
 import json
 import sys
+import time
 
 sys.path.insert(0, "/opt/imobiliare/bot")
 
@@ -110,7 +113,23 @@ async def main() -> None:
               f"payment {pay['amount']} {pay['currency']}, revenue_card={s['revenue_card']}")
         print("admin/buyer got the real notifications: "
               f"💳 {config.CARD_PRICE_CENTS/100:.2f} USD, keyboard {keyboards.rails_line()}")
-        print("\u2705 CARD RAIL OK - as soon as LS fires the webhook, the boost is credited by itself")
+
+        # --- watchdog: does the bot notice a silent webhook? (must stay quiet when healthy) ---
+        await db.log_event("card_checkout", user_id=buyer["id"], listing_id=listing_id)
+        ago = await db.card_checkout_ago_seconds()
+        assert ago is not None and ago < 60, ago
+        assert await db.card_checkouts_since(15) >= 1
+        assert await db.card_orders_since(15) == 1, "the forged delivery is inside the window"
+        assert scheduler.is_webhook_silent(None, 0) is False, "no link ever handed out"
+        assert scheduler.is_webhook_silent(60, 0) is False, "link too fresh to judge"
+        assert scheduler.is_webhook_silent(900, 0) is True, "old link + zero deliveries = alarm"
+        assert scheduler.is_webhook_silent(900, 1) is False, "one delivery means the rail lives"
+        scheduler._silence_alert_at = time.monotonic()  # belt and braces: no admin DMs from a test
+        config.CARD_ENABLED = True                      # the watchdog only speaks when the rail is on
+        assert await scheduler.check_webhook_silence(bot) is False, "healthy rail must stay silent"
+        print(f"watchdog: link {ago}s old + deliveries in window -> no alarm; 15 min of silence -> alarm")
+
+        print("✅ CARD RAIL OK - as soon as LS fires the webhook, the boost is credited by itself")
     finally:
         await conn.execute("DELETE FROM events WHERE listing_id = ?", (listing_id,))
         await conn.execute("DELETE FROM boosts WHERE listing_id = ?", (listing_id,))

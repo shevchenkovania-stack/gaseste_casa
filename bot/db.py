@@ -415,6 +415,31 @@ async def mark_card_order_applied(row_id: int) -> None:
     await db.commit()
 
 
+async def card_checkouts_since(minutes: int) -> int:
+    """Card payment pages we handed out in the window (demand side of the webhook)."""
+    cur = await _db().execute(
+        "SELECT COUNT(*) c FROM events WHERE name='card_checkout' "
+        "AND created_at > datetime('now', ?)", (f"-{int(minutes)} minutes",))
+    return (await cur.fetchone())["c"]
+
+
+async def card_orders_since(minutes: int) -> int:
+    """Deliveries the provider actually managed to store in the window (supply side)."""
+    cur = await _db().execute(
+        "SELECT COUNT(*) c FROM card_orders WHERE created_at > datetime('now', ?)",
+        (f"-{int(minutes)} minutes",))
+    return (await cur.fetchone())["c"]
+
+
+async def card_checkout_ago_seconds() -> int | None:
+    """Seconds since the last card payment link was handed out. None if it never happened."""
+    cur = await _db().execute(
+        "SELECT CAST((julianday('now') - julianday(MAX(created_at))) * 86400 AS INTEGER) s "
+        "FROM events WHERE name='card_checkout'")
+    row = await cur.fetchone()
+    return row["s"] if row and row["s"] is not None else None
+
+
 async def log_event(name: str, user_id: int | None = None, listing_id: int | None = None, meta: str | None = None) -> None:
     db = _db()
     await db.execute(

@@ -31,7 +31,7 @@ echo "=== wiring ==="
 /opt/imobiliare/venv/bin/python - <<'PYEOF'
 import sys
 sys.path.insert(0, "/opt/imobiliare/bot")
-import config, db, keyboards, lemon
+import config, db, keyboards, lemon, scheduler
 from handlers import boost
 
 def names(handlers):
@@ -39,6 +39,9 @@ def names(handlers):
 
 print("CARD_ENABLED:", config.CARD_ENABLED, "| price:", keyboards.usd(config.CARD_PRICE_CENTS),
       "| webhook secret set:", bool(config.LS_WEBHOOK_SECRET))
+print("watchdog: silent if no delivery for", scheduler.SILENCE_MINUTES, "min |",
+      "rule(900s, 0) =", scheduler.is_webhook_silent(900, 0),
+      "| WEBAPP_URL:", config.WEBAPP_URL or "(пусто — публичного адреса нет)")
 print("boost callback handlers:", names(boost.router.callback_query.handlers))
 print("rails line:", keyboards.rails_line())
 print("db has store_card_order/ensure_schema:",

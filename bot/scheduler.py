@@ -1,4 +1,5 @@
-"""Periodic jobs. Two matter for revenue: the Boost nudge and the card payment inbox.
+"""Periodic jobs. Two matter for revenue: the Boost nudge and the card payment inbox,
+plus a watchdog that notices when the inbox stops receiving deliveries.
 
 The inbox job is what makes card money real: Lemon Squeezy posts the order to the Mini App
 process, that process only stores it, and here (single writer) it becomes a boost + payment row.
@@ -6,6 +7,7 @@ Deterministic by design - plain SQL, plain arithmetic, no LLM, no heuristics.
 """
 import asyncio
 import logging
+import time
 
 from aiogram import Bot
 
@@ -15,6 +17,9 @@ import keyboards
 
 log = logging.getLogger("chiriebot.scheduler")
 CARD_TICK_SECONDS = 60  # how often the card payment inbox is checked
+SILENCE_MINUTES = 15    # a paid checkout reaches us in seconds; longer silence = broken webhook
+SILENCE_ALERT_COOLDOWN = 1800  # do not DM the same warning every minute
+_silence_alert_at = 0.0
 
 
 async def nudge_unboosted(bot: Bot) -> int:
@@ -98,6 +103,58 @@ async def apply_card_orders(bot: Bot) -> int:
     return applied
 
 
+def is_webhook_silent(link_ago_seconds: int | None, deliveries: int,
+                      grace_seconds: int = SILENCE_MINUTES * 60) -> bool:
+    """Pure rule, no DB: a payment link is old enough to have been paid, yet nothing arrived.
+
+    Deliberately conservative - one delivery inside the window marks the rail healthy, because a
+    false alarm on money code is worse than a missed one (the admin also sees card_unapplied).
+    """
+    return link_ago_seconds is not None and link_ago_seconds >= grace_seconds and deliveries == 0
+
+
+async def check_webhook_silence(bot: Bot) -> bool:
+    """Notice when Lemon Squeezy stops delivering orders while payment links are out there.
+
+    With a temporary HTTPS tunnel the public URL dies on every restart, so the provider keeps
+    posting to a host that no longer answers: the client pays real money, the boost never comes
+    and nothing anywhere says "error". Someone has to learn that in minutes, not at month end.
+    """
+    global _silence_alert_at
+    if not config.CARD_ENABLED:
+        return False
+    ago = await db.card_checkout_ago_seconds()
+    if ago is None or ago < SILENCE_MINUTES * 60:
+        return False  # nobody was sent to the payment page, or it is too fresh to judge
+    deliveries = await db.card_orders_since(SILENCE_MINUTES)
+    if not is_webhook_silent(ago, deliveries):
+        return False
+    if time.monotonic() - _silence_alert_at < SILENCE_ALERT_COOLDOWN:
+        return True
+    _silence_alert_at = time.monotonic()
+    checkouts = await db.card_checkouts_since(SILENCE_MINUTES)
+    await db.log_event("card_webhook_silent",
+                       meta=f"{checkouts} checkout(s), last link {ago // 60} min ago")
+    text = (
+        f"\u26a0\ufe0f <b>Касса молчит</b>\n"
+        f"Ссылок на оплату за {SILENCE_MINUTES} мин: <b>{checkouts}</b>, доставленных заказов: <b>0</b>.\n"
+        f"Последняя ссылка выдана {ago // 60} мин назад.\n\n"
+        "Значит одно из трёх: вебхук Lemon Squeezy указывает не на этот адрес, упал туннель/nginx, "
+        "или подпись не сходится (см. журнал imobiliare-web).\n"
+        f"Текущий публичный адрес: <code>{config.WEBAPP_URL or 'не задан (WEBAPP_URL пуст)'}</code>\n\n"
+        "Если клиент при этом платил - деньги у провайдера, но Boost не начислен: проверь вебхук, "
+        "попроси у LS повторную доставку и перезапусти оба сервиса."
+    )
+    log.warning("card webhook silent: %s checkouts, 0 deliveries, last link %ss ago",
+                checkouts, ago)
+    for admin in config.ADMIN_IDS:
+        try:
+            await bot.send_message(admin, text, parse_mode="HTML")
+        except Exception:
+            pass
+    return True
+
+
 async def run(bot: Bot) -> None:
     """Sleep first, then work forever. Exceptions never kill the loop."""
     elapsed = 0
@@ -108,6 +165,7 @@ async def run(bot: Bot) -> None:
             n = await apply_card_orders(bot)
             if n:
                 log.info("card boosts applied: %s", n)
+            await check_webhook_silence(bot)
         except asyncio.CancelledError:
             raise
         except Exception:

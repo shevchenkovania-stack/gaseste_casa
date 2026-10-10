@@ -45,7 +45,8 @@ bot/                     код бота и Mini App (один venv, один р
   publish.py             выкладка одобренного объявления: скачивание фото + пост в канал
   lemon.py               клиент Lemon Squeezy: создание checkout-ссылки, проверка подписи X-Signature,
                         разбор order-вебхука в карточку заказа (единственный модуль, знающий LS)
-  scheduler.py           фоновые задачи: Boost-нудж (двигатель выручки) + применение карточных заказов
+  scheduler.py           фоновые задачи: Boost-нудж (двигатель выручки), применение карточных
+                        заказов и сторож молчащего вебхука
   requirements.txt       aiogram, aiosqlite, aiohttp, python-dotenv
   .env.example           шаблон ENV-файла (реальный .env в git не попадает)
   handlers/
@@ -64,7 +65,11 @@ deploy/                  всё, что связано с сервером и п
   imobiliare-web.service systemd unit Mini App
   nginx-chirie.conf      шаблон reverse-proxy (ждёт домен)
   apply_https.sh         домен → nginx + certbot → HTTPS для Mini App И вебхука LS (одной командой)
+  apply_tunnel.sh        бесплатный HTTPS без домена: Cloudflare quick tunnel на 127.0.0.1:8085
+                        (адрес случайный и меняется при рестарте — отсюда сторож вебхука)
   apply_card.sh          / test_card_rail.py — приложить карточный рельс и проверить его без денег
+  register_ls_webhook.py регистрация вебхука Lemon Squeezy через API LS (создаёт тестовый и боевой,
+                        генерит секрет в .env, чистит вебхуки на умершем адресе, рестартует сервисы)
   apply_nudge.sh, apply_manual.sh, verify_nudge.sh, verify_manual.sh, status.sh,
   cleanup_test.sh, test_money_path.py, make_demo.py, post_promo.py, audit.py, whoami.sh,
   seed.py, mk_tmp_listing.py, setup_channel.py, set_avatar*, make_avatar.py, test_render.py,
@@ -85,12 +90,13 @@ Telegram-пользователь ──> aiogram polling ──> handlers/* ─
                                   │                                   ▲
                                   ├──> publish.py ──> канал @gaseste_casa (posts + фото)
                                   │                                   │
-scheduler.py (тот же процесс) ────┘  нудж + apply_card_orders         │
-                                          webapp/app.py (aiohttp, 127.0.0.1:8085)
-                                             ▲ читает ту же БД, пишет views/contacts
-Lemon Squeezy ──POST /webhook/lemonsqueezy (HMAC)──>┘  карточка заказа в card_orders
-                                             ▲
-                                         SPA index.html (пока только локально)
+scheduler.py (тот же процесс) ────┘  нудж + apply_card_orders + сторож ┘
+
+webapp/app.py (aiohttp, 127.0.0.1:8085)  ← читает ту же БД, пишет views/contacts, хранит card_orders
+   ▲  ▲ SPA index.html (витрина)
+   └── публичный HTTPS: cloudflared quick tunnel (apply_tunnel.sh)
+                       или nginx + certbot (apply_https.sh)
+Lemon Squeezy ──POST /webhook/lemonsqueezy (подпись X-Signature)──> тот же туннель → card_orders
 ```
 
 Разделение ответственности в деньгах: **веб-процесс только принимает** карточные заказы (подпись →
@@ -102,9 +108,11 @@ Lemon Squeezy ──POST /webhook/lemonsqueezy (HMAC)──>┘  карточк�
 
 1. **Одна SQLite на два процесса.** Поэтому `PRAGMA journal_mode=WAL` и `busy_timeout=5000`
    обязательны — без них бывают `database is locked`.
-2. **Бот на polling, не на webhook.** Наружу не смотрит ничего, кроме nginx, когда включён HTTPS-рельс:
-   пока домена нет, `ufw` держит открытым только SSH :22. Вебхук Lemon Squeezy принимает **webapp**
-   (`/webhook/lemonsqueezy`), не бот — то есть деньги приходят в процесс, который и так слушает
+2. **Бот на polling, не на webhook.** Наружу не смотрит ничего, кроме публичного HTTPS: постоянный
+   путь — nginx + certbot (`apply_https.sh`, `ufw allow 'Nginx Full'`), временный — cloudflared
+   quick tunnel (`apply_tunnel.sh`), у которого **нет входящих портов вообще** (туннель сам ходит к
+   Cloudflare), поэтому `ufw` может держать открытым только SSH :22. Вебхук Lemon Squeezy принимает
+   **webapp** (`/webhook/lemonsqueezy`), не бот — то есть деньги приходят в процесс, который и так слушает
    127.0.0.1:8085, а бот их только начисляет.
 3. **Порядок роутеров в `main.py` имеет значение:** `start, add, browse, profile, boost, admin`.
    `boost.router` должен быть раньше `admin.router`, потому что админ обрабатывает `manapp:`/`manrej:`,
@@ -228,6 +236,9 @@ CREATE INDEX idx_listings_district ON listings(district);
   `False` ⇒ удвоение платежа невозможно на уровне схемы;
 - `card_orders_to_apply(limit=20)` → `applied=0 AND status='paid' AND listing_id IS NOT NULL`;
   `mark_card_order_applied(id)` — ставит флаг после начисления;
+- три запроса для сторожа вебхука: `card_checkout_ago_seconds()` (секунды с последней выданной
+  ссылки оплаты, `None` если никогда не выдавалась), `card_checkouts_since(minutes)` (сколько ссылок
+  выдали в окне) и `card_orders_since(minutes)` (сколько доставок реально пришло в окне);
 - `get_user_by_tg_id(tg_id)` — читает покупателя, **не создавая** его (в отличие от
   `get_or_create_user`, который затёр бы NULL-ами username/first_name);
 - `stats()` — пользователи, объявления, `boosts WHERE status IN ('paid','manual')`,
@@ -355,7 +366,11 @@ scheduler.apply_card_orders (бот-процесс, каждые 60 с, ЕДИН
 **Железные требования провайдера (иначе касса не работает):**
 - **публичный HTTPS-хост обязателен.** `GET /v1/orders` не возвращает `custom_data`, то есть
   опрашивать LS список заказов бесполезно — атрибуция «какой это объект» живёт только в вебхуке.
-  Поэтому рельс включён по-настоящему только после `deploy/apply_https.sh <домен>`.
+  Постоянный вариант — `deploy/apply_https.sh <домен>` (nginx + certbot), временный бесплатный —
+  `deploy/apply_tunnel.sh` (Cloudflare quick tunnel, адрес `https://<случайное>.trycloudflare.com`).
+  У туннеля две цены: адрес **меняется при каждом рестарте** (его надо пересохранять в LS) и он
+  живёт, пока жив unit `cloudflared-tunnel`. Именно поэтому рядом стоит сторож `check_webhook_silence`
+  (§9): он замечает «ссылку дали, денег не дополучили» за 15 минут, а не в конце месяца.
 - подпись — заголовок **`X-Signature`** = HMAC-SHA256 **raw body** (hex) на `LS_WEBHOOK_SECRET`.
   Хедер называется не `X-LemonSqueezy-Signature`; читать надо `await request.read()`, а не
   уже распарсенный JSON (иначе канонизация тела сломает подпись).
@@ -431,7 +446,7 @@ stars=total_amount, telegram_charge_id=…)` + `events.boost_paid` (или `test
 
 В том же процессе, что и бот: `asyncio.create_task(scheduler.run(bot))` рядом с `dp.start_polling`,
 `job.cancel()` в `finally`. Один цикл, два ритма: **каждые `CARD_TICK_SECONDS=60` с** — `apply_card_orders`
-(начисление карточных платежей), накопилось `NUDGE_INTERVAL_HOURS*3600` с — `nudge_unboosted`.
+(начисление карточных платежей) и `check_webhook_silence` (сторож), накопилось `NUDGE_INTERVAL_HOURS*3600` с — `nudge_unboosted`.
 Цикл **спит первым**, поэтому после рестарта ничего не наваливается сразу. Любое исключение внутри
 прохода ловится и **не убивает** цикл (`except asyncio.CancelledError: raise` выше общего `except` —
 иначе задача не осталась бы отменяемой). Обе задачи пишут в лог только когда реально что-то сделали.
@@ -446,6 +461,16 @@ stars=total_amount, telegram_charge_id=…)` + `events.boost_paid` (или `test
 админам. Если объявление или покупатель не найдены — строка остаётся **неприменённой**, а в `events`
 летит `card_order_unmatched`: деньги не теряются, а `/stats` покажет их в `card_unapplied` как сигнал
 «разбирайся руками». Повторная доставка вебхука ничего не начисляет (флаг + `UNIQUE order_id`).
+
+`check_webhook_silence(bot)` — сторож кассы, нужен из-за временного публичного адреса (туннель):
+ссылка на оплату выдана **больше `SILENCE_MINUTES=15` мин назад**, а за это окно в `card_orders`
+не пришло **ни одной** доставки ⇒ LS стучится в никуда (туннель пересоздался, nginx/веб-процесс упал,
+секрет не совпал). Тогда `events.card_webhook_silent` + предупреждение каждому админу с текущим
+`WEBAPP_URL`, повтор предупреждения — не чаще одного раза в `SILENCE_ALERT_COOLDOWN=1800` с
+(счётчик в модуле: `_silence_alert_at` на `time.monotonic()`, то есть после рестарта бота он обнуляется).
+Само правило вынесено в чистую функцию `is_webhook_silent(ago_seconds, deliveries)` — её можно
+проверять без БД и без DM-рассылки (см. `deploy/test_card_rail.py`). Пока `CARD_ENABLED=False`,
+сторож молчит: выключенный рельс не может «ничего не дополучить».
 
 ---
 
@@ -510,8 +535,28 @@ bash /tmp/status.sh                            # см. §11
 3. Админ должен нажать `/start` в боте, иначе у него нет строки в `users` и демо-объявление создать нечем.
 4. Пост-визитка в канал и её закрепление: `deploy/post_promo.py` (на проде это message_id **4**).
 
-**Публичный HTTPS (нужен и Mini App, и карточному рельсу):** остаётся один человеческий шаг —
-**домен с A-записью на IP VPS**. Дальше всё делает `deploy/apply_https.sh`:
+**Публичный HTTPS (нужен и Mini App, и карточному рельсу).** Есть два пути — временный бесплатный и
+постоянный. Оба делают одно: наружу открывается `https://…/webhook/lemonsqueezy` и `WEBAPP_URL` в `.env`
+перезаписывается на публичный адрес.
+
+*Временный, без домена (один шаг, 0 €, адрес случайный):*
+
+```bash
+scp deploy/apply_tunnel.sh root@<IP>:/tmp/
+ssh root@<IP> "sed -i 's/\r$//' /tmp/apply_tunnel.sh && bash /tmp/apply_tunnel.sh"
+```
+
+Скрипт скачивает статический бинарник `cloudflared` в `/usr/local/bin`, пишет unit
+`cloudflared-tunnel.service` (`cloudflared tunnel --url http://127.0.0.1:8085 --no-autoupdate`,
+`Restart=always`), берёт появившийся в журнале адрес `https://<случайное>.trycloudflare.com`, вписывает
+его в `WEBAPP_URL`, перезапускает оба сервиса и проверяет снаружи `GET /api/stats` и **401** на вебхуке.
+Входящих портов не добавляет (туннель исходящий), `ufw` можно не трогать; если постоянного домена не
+будет, лишние `ufw delete allow 'Nginx Full'` вернёт сервер к «открыт только SSH».
+**Обязательное следствие:** адрес меняется при каждом рестарте туннеля/сервера, поэтому после рестарта
+надо (а) перезалить адрес в LS Settings → Webhooks и (б) перезапустить `bash /tmp/apply_tunnel.sh`,
+чтобы `.env` снова показывал правду. Контроль «деньги у LS, а Boost не включился» — сторож из §9.
+
+*Постоянный (домен с A-записью на IP VPS):*
 
 ```bash
 scp deploy/apply_https.sh root@<IP>:/tmp/
@@ -525,20 +570,43 @@ ssh root@<IP> "sed -i 's/\r$//' /tmp/apply_https.sh && bash /tmp/apply_https.sh 
 в `.env` и перезапускает бота. После — в @BotFather: `/newapp` (или Bot Settings → Menu Button) на этот URL.
 Ручной путь без скрипта: шаблон `deploy/nginx-chirie.conf` (заменить `imobil.REPLACE_ME.md`).
 
-**Настройка Lemon Squeezy (это делает человек, бот не может):**
+**Настройка Lemon Squeezy (частично делает человек, остальное — код):**
 
-1. Аккаунт на lemon-squeezy.com → создать **store** → `Settings → API` → ключ → `LS_API_KEY`;
-   id магазина → `LS_STORE_ID`.
-2. **Products** → один товар «Boost» (любая цена — мы переопределяем её `custom_price`) → скопировать
-   **Variant ID** → `LS_VARIANT_ID`.
-3. Домен уже живой (см. выше) → `Settings → Webhooks → New`: callback
-   `https://<домен>/webhook/lemonsqueezy`, события `order_created, order_processed, order_refunded`,
-   **signing secret** → в `.env` (`LS_WEBHOOK_SECRET`) → `systemctl restart imobiliare-web`.
-4. `Banking` → Молдова поддерживается как страна выплаты; вывод включается после проверки аккаунта.
-5. Проверка без денег: `mode test` в LS даёт заказ с `test_mode=1` — бот начислит Boost, но
-   `REAL_REVENUE` не изменится (это правильно). Боевой прогон без LS-аккаунта — `deploy/test_card_rail.py`.
+1. Аккаунт: `lemonsqueezy.com` → Sign up (email/пароль или Google) → письмо подтверждения → ссылка.
+2. Создать **store** (имя + subdomain вида `my-store.lemonsqueezy.com`). Аккаунт сразу в **Test mode** —
+   в тестовом режиме можно создавать товары и проводить тестовые покупки, настоящих денег нет.
+3. **Products** → один товар «Boost» (любая цена — мы переопределяем её `custom_price`; тип — цифровой
+   товар). Скопировать **Variant ID**.
+4. `Settings → API` → **Generate key** → `LS_API_KEY`. id магазина — из URL дашборда → `LS_STORE_ID`.
+   Эти два значения + `LS_VARIANT_ID` (3 числа/строки) приходят мне, я вписываю в `.env`.
+5. **Вебхук регистрирует код, не человек:** `bash /tmp/apply_tunnel.sh` (публичный адрес) →
+   `/opt/imobiliare/venv/bin/python /tmp/register_ls_webhook.py`. Скрипт по API LS
+   (`POST /v1/webhooks`, документация проверена 10.10) создаёт **два** вебхука — тестовый и боевой —
+   на `https://<адрес>/webhook/lemonsqueezy` с событиями `order_created, order_processed,
+   order_refunded` (если LS отклоняет список событий — автоматический откат на
+   `order_created, order_refunded`), генерирует signing secret, пишет его в `.env` как
+   `LS_WEBHOOK_SECRET`, удаляет вебхуки, оставшиеся на прежнем (уже мёртвом) адресе туннеля,
+   проверяет создание checkout реальным запросом к LS и перезапускает оба сервиса. Второй смысл
+   двух вебхуков: при переходе магазина из test mode в live перерегистрация не нужна.
+6. **Активация магазина (блокер человека, и только для настоящих денег).** По документации LS
+   новый магазин торгует по-настоящему только после `Activate your store`: анкета о бизнесе +
+   верификация личности (KYC/KYB), проверка обычно 1–2 рабочих дня. Политика LS прямо говорит: обычно
+   **не одобряют** магазины, чей товар выполняется вне LS (услуги, аренда, «доступ к приватной
+   telegram-группе»), и **одобряют** цифровые товары, подписки и лицензионные ключи. Наша честная
+   формулировка в анкете: цифровой товар «Boost — поднятие объявления в топе на 7 дней», выдача
+   автоматическая внутри нашего приложения, к заказу прикладывается лицензионный ключ (в LS у товара
+   включается license keys) — физической поставки и доступа в закрытые группы нет.
+   До активации всё остальное уже работает: тестовые покупки через `test_mode=1` начисляют Boost и
+   не попадают в `REAL_REVENUE`.
+7. `Banking`/`Payouts` (`Settings → Payouts`) → PayPal или банковский счёт; Молдова в списке стран
+   выплат мерчанту. Включается после активации.
+8. Проверка без денег: `deploy/test_card_rail.py` (наш, без аккаунта) и тестовая покупка через LS.
 
-Без шагов 1–3 кнопка «💳 Картой» просто не появляется (`CARD_ENABLED=False`), клиент видит MDL и Stars —
+**План Б, если LS откажет (решение не код, а провайдер):** рельс MDL переводом уже написан и не требует
+никого — первый реальный доллар может прийти по нему; второй вариант — другой merchant of record
+(Polar/Whop/Gumroad) с тем же контрактом «checkout + подписанный вебхук», правка только в `lemon.py`.
+
+Без шагов 1–4 кнопка «💳 Картой» просто не появляется (`CARD_ENABLED=False`), клиент видит MDL и Stars —
 рельсы работают.
 
 Безопасность (теперь нарушено, чинить при случае): оба сервиса идут от `root`; нужен отдельный
@@ -584,8 +652,14 @@ PowerShell ломает кавычки и `[`. Всегда: файл `.sh`/`.py
 `deploy/apply_nudge.sh` / `verify_nudge.sh` (нудж), `deploy/cleanup_test.sh`,
 **`deploy/apply_card.sh`** (карточный рельс: компиляция включая `lemon.py`, дописывает 5 LS-ключей в
 `.env`, рестартит **сначала бота** (он владеет схемой), затем веб; печатает `CARD_ENABLED`, список
-обработчиков `boost`, `rails_line()`, схему `card_orders`/`payments` и делает curl вебхука — **401**
-означает «роут живой, подпись требует»), **`deploy/apply_https.sh <домен>`** (см. §10).
+обработчиков `boost`, `rails_line()`, параметры сторожа и текущий `WEBAPP_URL`, схему
+`card_orders`/`payments` и делает curl вебхука — **401**
+означает «роут живой, подпись требует»), **`deploy/apply_https.sh <домен>`** и
+**`deploy/apply_tunnel.sh`** (см. §10 — временный публичный HTTPS без домена; перезапускать после
+каждого рестарта туннеля, он печатает текущий адрес и сам правит `WEBAPP_URL`) и
+**`deploy/register_ls_webhook.py`** (регистрирует вебхук в LS через API: создаёт тестовый+боевой,
+генерит и пишет `LS_WEBHOOK_SECRET`, чистит вебхуки на старом адресе, проверяет checkout, рестартует
+сервисы; без `LS_API_KEY`/`LS_STORE_ID`/https-`WEBAPP_URL` корректно отказывается что-либо трогать).
 
 Тесты и боевые прогоны (запускаются на сервере, самоочищаются):
 
@@ -596,7 +670,9 @@ PowerShell ломает кавычки и `[`. Всегда: файл `.sh`/`.py
   `verify_signature` → `parse_order_event` → `store_card_order` (тупик дубля тоже проверяется) →
   `scheduler.apply_card_orders` и утверждает `boosted_until`, строку `payments` (5.0 USD,
   `boost_card`, `is_test=0`), `boosts.status='paid'`, `stats().revenue_card` и `card_unapplied=0`,
-  после чего всё удаляет. Успех = `✅ CARD RAIL OK`;
+  плюс проверяет сторожа (`is_webhook_silent` на четырёх наборах входных данных и один проход
+  `check_webhook_silence`, который на здоровом рельсе должен вернуть `False`, то есть писать админам
+  не должен), после чего всё удаляет. Успех = `✅ CARD RAIL OK`;
 - `deploy/make_demo.py` — удаляет старые ДЕМО-карточки, создаёт активную «ДЕМО» карточку на админе
   и шлёт админу настоящий Boost-оффер (все включённые кнопки). Не публикуется в канал;
 - `deploy/post_promo.py [message_id]` — пост-визитка в канал + пин; с аргументом **редактирует**
@@ -608,12 +684,15 @@ PowerShell ломает кавычки и `[`. Всегда: файл `.sh`/`.py
 снеси тестовые строки:
 
 ```bash
-/opt/imobiliare/venv/bin/python - <<'PY'
-import sqlite3; d=sqlite3.connect('/opt/imobiliare/data/imobiliare.db')
-d.execute("delete from payments where purpose='boost_manual'"); d.execute("delete from boosts where status='manual'")
-d.execute("update listings set boosted_until=NULL where description like '%ДЕМО%'"); d.commit()
-print(d.execute("select count(*) from payments").fetchone())
-PY
+/opt/imobiliare/venv/bin/python - <<'PYEOF'
+import sqlite3
+d = sqlite3.connect('/opt/imobiliare/data/imobiliare.db')
+d.execute("delete from payments where purpose='boost_manual'")
+d.execute("delete from boosts where status='manual'")
+d.execute("update listings set boosted_until=NULL where description like '%ДЕМО%'")
+d.commit()
+print("payments left:", d.execute("select count(*) from payments").fetchone())
+PYEOF
 ```
 
 ---
@@ -684,6 +763,19 @@ o='/opt/imobiliare/data/bak-%d.db'%time.time();d=sqlite3.connect(o);s.backup(d)"
   `scheduler.apply_card_orders` — единственный писатель денег для карты. Иначе два процесса гонялись бы
   за `boosted_until`, а ретрай доставки удваивал бы Boost. Цена ошибки — реальные деньги, поэтому
   детерминированный SQL и идемпотентность по `order_id`, без «умной» логики.
+- **Публичный HTTPS временно — бесплатный туннель, а вебхук регистрирует код.** Решение человека
+  10.10: не покупать домен ради первого платежа, а поднять `apply_tunnel.sh` (cloudflared quick tunnel,
+  0 €) и перейти на `apply_https.sh <домен>`, когда продукт начнёт окупаться. Цена — адрес меняется
+  при рестарте, поэтому (а) `register_ls_webhook.py` пересоздаёт вебхук по API за секунды и чистит
+  старые записи, (б) `check_webhook_silence` не даёт «деньги у провайдера, а Boost не включился»
+  остаться незамеченным. Альтернативы, от которых отказались: покупать домен сразу (медленнее и
+  дороже на нулевой выручке), «просто держать LS-ссылку без вебхука» (атрибуции заказа нет),
+  пересылать платежи на e-mail/вручную (не «как у людей», и не масштабируется).
+- **Одобрение LS — внешний риск, а не наш код.** Политика merchant of record: услуги и «то, что
+  исполняется вне LS», обычно не одобряются; цифровые товары, подписки и лицензионные ключи —
+  одобряются. Поэтому продукт позиционируется как цифровой (Boost + лицензионный ключ на заказ),
+  анкета заполняется честно, а план Б (MDL-рельс и/или другой MoR) существует с самого начала —
+  первый доллар не должен зависеть от решения одной комплаенс-команды.
 - **Рельс MDL с ручным подтверждением — страховка, а не основной:** решение принято после тех же ошибок
   Telegram (§8) — иначе проект стоит без платежей. Он же единственный работает совсем без провайдера.
   Юридическая оговорка: регулярные переводы физлицу = предпринимательская деятельность; после 5–20 продаж
@@ -706,14 +798,19 @@ o='/opt/imobiliare/data/bak-%d.db'%time.time();d=sqlite3.connect(o);s.backup(d)"
 демо-карточка пересоздана (последняя — #10), реальных объявлений **0**, платежей **0**, `REAL_REVENUE = 0`.
 nginx 1.24 + certbot 2.9 **установлены**, `ufw allow 'Nginx Full'` открыт, порт 80 отвечает снаружи 200 —
 не хватает только hostname с A-записью. Карточный рельс **задеплоен и проверен тестом без денег**
-(`test_card_rail.py` → `✅ CARD RAIL OK`), но `CARD_ENABLED=False`: нет аккаунта Lemon Squeezy.
+(`test_card_rail.py` → `✅ CARD RAIL OK`, включая сторожа), но `CARD_ENABLED=False`: нет аккаунта
+Lemon Squeezy, поэтому кнопка «💳 Картой» клиенту ещё не видна, а `WEBAPP_URL` пуст.
 
 Не сделано, по приоритету:
 
 1. Нет аккаунта/ключей **Lemon Squeezy** (`LS_API_KEY/LS_STORE_ID/LS_VARIANT_ID`) — кнопка «💳 Картой»
-   не появляется (человеческий шаг, §10).
-2. Нет **домена с A-записью** → нет HTTPS ⇒ вебхук LS физически не может приходить, Mini App недоступна
-   пользователям, кнопка «Открыть приложение» скрыта. Чинится одной командой `apply_https.sh`.
+   не появляется (человеческий шаг, §10). Следом за ним такой же человеческий шаг — **активация
+   магазина** (анкета + KYC, 1–2 рабочих дня); без неё тестовые покупки работают, настоящих денег нет,
+   и есть риск отказа именно из-за «услугового» типа товара (§10 «План Б», §14).
+2. Нет **публичного HTTPS** ⇒ вебхук LS физически не может приходить, Mini App недоступна
+   пользователям, кнопка «Открыть приложение» скрыта. Выбран путь «сначала дешёвое»:
+   `apply_tunnel.sh` (0 €, адрес случайный, меняется при рестарте), потом `apply_https.sh <домен>`
+   как постоянный вариант. Молчание вебхука после рестарта ловит сторож `check_webhook_silence` (§9).
 3. `PAY_INFO` пустой — рельс MDL не отдаёт реквизиты покупателю (человеческий шаг).
 4. 0 реальных объявлений на доске — главный блокер, не код (нужно 3–5, потом 50–100).
 5. Нет бэкапов БД, сервисы от root, нет rate-limit на подачу объявлений.
@@ -746,8 +843,12 @@ nginx 1.24 + certbot 2.9 **установлены**, `ufw allow 'Nginx Full'` о
 8. Прогнать тесты без денег (§11): `test_card_rail.py` (карта) и ручной MDL-прогон через ДЕМО-карточку,
    затем `/nudge` — убедиться, что выручка считается по всем трём рельсам.
 9. Если потерян домен/сертификат: купить или восстановить A-запись → `bash /tmp/apply_https.sh <домен>` →
-   в LS пересохранить вебхук на новый URL (и тот же signing secret в `.env`).
+   `python /tmp/register_ls_webhook.py` (вебхук на новый адрес создаёт код, руками в дашборде —
+   только если нет `LS_API_KEY`). Быстрый бесплатный эквивалент без домена: `bash /tmp/apply_tunnel.sh`
+   (тот же результат — `WEBAPP_URL` + проверка 401, но адрес новый при каждом запуске).
    **`card_unapplied > 0` в `/stats` = заказы пришли, но не начислились** — чинить по §8.
+   **Админу пришло «⚠️ Касса молчит»** = ссылки на оплату выдаются, доставок нет: смотреть
+   `journalctl -u imobiliare-web` (401 = секрет/подпись, пусто = URL в LS не тот или туннель умер).
 
 ## 17. Ключевые якоря (числа, которые легко забыть)
 
@@ -761,6 +862,10 @@ nginx 1.24 + certbot 2.9 **установлены**, `ufw allow 'Nginx Full'` о
 | Продукт | Boost на `BOOST_DAYS=7` дней: **картой `CARD_PRICE_CENTS=500` = $5.00** (LS), `BOOST_MDL=100` MDL, `BOOST_STARS=50` ⭐ |
 | Вебхук карты | `POST /webhook/lemonsqueezy`, подпись `X-Signature` (HMAC-SHA256 hex от raw body), события `order_created/order_processed/order_refunded`, `custom_data = {listing_id, tg_id}` |
 | LS-аккаунт | store + **один** товар (цена переопределяется `custom_price`); id магазина и variant id → `.env` |
+| Активация LS | новый магазин всегда в **test mode**; настоящая торговля — только после `Activate your store` (анкета + верификация личности, обычно 1–2 рабочих дня); услуги/аренду и «доступ в telegram-группы» LS обычно **не** одобряет ⇒ товар подаём как цифровой + license key |
+| Регистрация вебхука | `deploy/register_ls_webhook.py` → `POST /v1/webhooks` (тестовый **и** боевой, `secret = secrets.token_hex(24)` → `.env`) + `DELETE /v1/webhooks/{id}` для старых адресов туннеля |
+| Публичный HTTPS | временно cloudflared quick tunnel: unit `cloudflared-tunnel`, `https://<случайное>.trycloudflare.com`, адрес меняется при рестарте. Постоянно: `apply_https.sh <домен>` (nginx + certbot) |
+| Сторож кассы | `SILENCE_MINUTES=15` (ссылка дана, доставок нет) ⇒ `events.card_webhook_silent` + ЛС админам; повтор не чаще `SILENCE_ALERT_COOLDOWN=1800` с |
 | Checkout | живёт `POST /v1/checkouts`, `expires_at` = **+3 ч** (`expires_minutes=180`), ссылка отдаётся URL-кнопкой |
 | Двигатель | нудж: после 2 дней, кулдаун 4 дня, проход каждые 6 ч; **карточный ящик — каждые 60 с** |
 | Репозиторий | `github.com/shevchenkovania-stack/gaseste_casa`, ветка `main`, пуш на каждый этап |
