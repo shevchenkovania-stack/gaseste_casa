@@ -196,7 +196,7 @@ async def webhook_lemonsqueezy(request: web.Request) -> web.Response:
 
 async def app_factory() -> web.Application:
     app = web.Application()
-    conn = await aiosqlite.connect(f"file:{DB_PATH}?mode=rw", uri=True)
+    conn = await aiosqlite.connect(f"file:{DB_PATH}?mode=rwc", uri=True)
     conn.row_factory = aiosqlite.Row
     await conn.execute("PRAGMA busy_timeout=5000")
     await db.ensure_schema(conn)  # card_orders must exist even if the bot restarts later
