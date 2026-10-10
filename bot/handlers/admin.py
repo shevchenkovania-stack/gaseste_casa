@@ -134,7 +134,6 @@ async def admin_help(message: Message) -> None:
         "/stats — статистика\n"
         "/pending — объявления на модерации\n"
         "/nudge — сразу предложить Boost тем, кто не в топе\n"
-        "/testpay [id] — тестовый счёт XTEST (проверить кассу без карты)\n"
         "/broadcast <текст> — рассылка всем пользователям бота",
     )
 
@@ -173,9 +172,6 @@ async def broadcast(message: Message, bot: Bot) -> None:
 async def pending(message: Message) -> None:
     if not is_admin(message.from_user.id):
         return
-    rows = await db.search_listings(limit=20)
-    # show pending separately
-    import aiosqlite
     cur = await db._db().execute("SELECT * FROM listings WHERE status='pending' ORDER BY created_at LIMIT 20")
     pend = await cur.fetchall()
     if not pend:
