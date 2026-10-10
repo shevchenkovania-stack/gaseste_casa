@@ -1,9 +1,18 @@
 import asyncio
+import re
+
 import aiohttp
 
+ENV = '/opt/imobiliare/bot/.env'
+
+
+def token() -> str:
+    """Read BOT_TOKEN from the server .env - never hardcode it."""
+    return re.search(r'^BOT_TOKEN=(\S+)', open(ENV).read(), re.M).group(1)
+
+
 async def main():
-    token = 'REPLACE_WITH_BOT_TOKEN_FROM_ENV'
-    url = f'https://api.telegram.org/bot{token}/setMyProfilePhoto'
+    url = f'https://api.telegram.org/bot{token()}/setMyProfilePhoto'
     async with aiohttp.ClientSession() as sess:
         with open('/root/avatar2.png', 'rb') as f:
             data = f.read()
