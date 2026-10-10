@@ -1,0 +1,67 @@
+import html
+
+from aiogram.types import InputMediaPhoto
+
+import db
+import keyboards
+from constants import DEAL_LABELS, PTYPE_LABELS, STATUS_LABELS
+
+
+def esc(v) -> str:
+    return html.escape(str(v)) if v is not None else ""
+
+
+def listing_caption(row, show_status: bool = False) -> str:
+    deal = DEAL_LABELS.get(row["deal"], row["deal"])
+    ptype = PTYPE_LABELS.get(row["ptype"], row["ptype"])
+    lines = [f"<b>#{row['id']} · {deal} · {ptype}</b>"]
+    parts = []
+    if row["rooms"]:
+        parts.append(f"{row['rooms']} комн.")
+    if row["area"]:
+        parts.append(f"{row['area']} м²")
+    if row["floor"]:
+        f = f"{row['floor']}"
+        if row["floors"]:
+            f += f"/{row['floors']}"
+        parts.append(f"{f} этаж")
+    if parts:
+        lines.append(" · ".join(parts))
+    lines.append(f"\U0001F4CD {esc(row['district'])}")
+    lines.append(f"\U0001F4B0 <b>{row['price']} {esc(row['currency'])}</b>")
+    if row["description"]:
+        lines.append("")
+        lines.append(esc(row["description"]))
+    if show_status:
+        lines.append("")
+        lines.append(f"Статус: {STATUS_LABELS.get(row['status'], row['status'])}")
+    boosted = row["boosted_until"]
+    if boosted and boosted > "":
+        pass
+    return "\n".join(lines)
+
+
+async def send_listing(bot, chat_id: int, row, owner: bool = False, with_keyboard: bool = True) -> None:
+    photos = db.listing_photos(row)
+    caption = listing_caption(row, show_status=owner)
+    kb = keyboards.listing_kb(row["id"], owner, bool(row["boosted_until"])) if with_keyboard else None
+    if photos:
+        media = []
+        for i, p in enumerate(photos[:10]):
+            if i == 0:
+                media.append(InputMediaPhoto(media=p, caption=caption, parse_mode="HTML"))
+            else:
+                media.append(InputMediaPhoto(media=p))
+        await bot.send_media_group(chat_id, media)
+        if kb:
+            await bot.send_message(chat_id, "\u2b07\uFE0F", reply_markup=kb)
+    else:
+        await bot.send_message(chat_id, caption, parse_mode="HTML", reply_markup=kb)
+
+
+def listing_button_text(row) -> str:
+    deal = DEAL_LABELS.get(row["deal"], row["deal"])[:2]
+    ptype = PTYPE_LABELS.get(row["ptype"], row["ptype"])[:4]
+    rooms = f"{row['rooms']}к " if row["rooms"] else ""
+    star = "\u2B50 " if row["boosted_until"] else ""
+    return f"{star}{deal} · {ptype} · {rooms}{row['district']} · {row['price']}{row['currency']}"

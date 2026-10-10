@@ -1,0 +1,16 @@
+[Unit]
+Description=ChirieBot Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/imobiliare/bot
+EnvironmentFile=/opt/imobiliare/bot/.env
+ExecStart=/opt/imobiliare/venv/bin/python main.py
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target
