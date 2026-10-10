@@ -10,6 +10,7 @@ for k in ('users', 'listings', 'boosts', 'payments', 'events'):
     print(k, d.execute(f'select count(*) from {k}').fetchone()[0])
 print('listing statuses:', d.execute("select status, count(*) from listings group by status").fetchall())
 print('events:', d.execute("select name, count(*) from events group by name").fetchall())
+print('listings:', d.execute("select id, status, district, substr(description,1,30) from listings").fetchall())
 PYEOF
 echo "=== env keys ==="
 grep -oE '^[A-Z_]+' /opt/imobiliare/bot/.env
