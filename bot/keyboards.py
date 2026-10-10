@@ -1,3 +1,5 @@
+import html
+
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 
 import config
@@ -87,13 +89,74 @@ def usd(cents: int) -> str:
     return f"${cents / 100:.2f}"
 
 
+def transfer_word() -> str:
+    """How we call the MDL rail: MIA (BNM instant payments) once a phone number is configured."""
+    return "MIA" if config.PAY_PHONE else "переводом"
+
+
+def transfer_button() -> str:
+    """Button label for the MDL rail, capitalised the way a button deserves."""
+    return f"MIA {config.BOOST_MDL} MDL" if config.PAY_PHONE else f"Перевод {config.BOOST_MDL} MDL"
+
+
+def pay_lines(listing_id: int) -> list:
+    """Fields the buyer enters in their banking app, in the order the bank asks for them.
+    The 'Boost #N' line is the comment we look for in the bank statement, so it is always there."""
+    lines = []
+    if config.PAY_PHONE:
+        lines.append(config.PAY_PHONE)
+    if config.PAY_NAME:
+        lines.append(config.PAY_NAME)
+    if config.PAY_INFO:
+        lines.append(config.PAY_INFO)
+    lines.append(f"Boost #{listing_id}")
+    return lines
+
+
+def pay_block(listing_id: int) -> str:
+    """Tap-to-copy block: Telegram copies the whole <code> when the user taps it, so nobody
+    retypes a phone number and nobody mistypes the comment we match payments by."""
+    return "<code>" + html.escape("\n".join(pay_lines(listing_id))) + "</code>"
+
+
+def manual_pitch(listing_id: int) -> str:
+    """The whole MDL payment instruction, written for a person holding a Moldovan banking app."""
+    price = config.BOOST_MDL
+    if config.PAY_PHONE:
+        who = f", сверь имя получателя: <b>{html.escape(config.PAY_NAME)}</b>." if config.PAY_NAME else \
+              ", сверь имя получателя на экране подтверждения."
+        return (
+            f"\u26A1 <b>Boost за {price} MDL</b> (объявление #{listing_id}, {config.BOOST_DAYS} дней)\n\n"
+            "1. В приложении банка открой <b>MIA \u00b7 Мгновенные платежи</b> \u2192 «Перевод P2P».\n"
+            f"2. Введи номер получателя и сумму <b>{price} MDL</b>{who}\n"
+            "3. Комментарием к переводу напиши текст из блока ниже \u2014 по нему мы найдём "
+            "твой платёж за секунды.\n\n"
+            f"{pay_block(listing_id)}\n\n"
+            "Перевод приходит мгновенно, комиссии для переводящего нет. Как только отправишь \u2014 "
+            "нажми «Я перевёл»."
+        )
+    details = html.escape(config.PAY_INFO) if config.PAY_INFO else "реквизиты пришлёт модератор"
+    return (
+        f"\U0001F4B0 <b>Boost за {price} MDL</b> (объявление #{listing_id}, {config.BOOST_DAYS} дней)\n\n"
+        f"1. Переведи <b>{price} MDL</b>: {details}\n"
+        f"   В комментарии укажи номер объявления <b>#{listing_id}</b>.\n"
+        "2. Нажми «Я перевёл» \u2014 модератор проверит поступление и поднимет объявление.\n\n"
+        "Обычно подтверждение занимает несколько минут в рабочее время."
+    )
+
+
+def manual_reference(listing_id: int) -> str:
+    """What the admin must spot in the bank statement for this claim."""
+    return f"Boost #{listing_id}"
+
+
 def rails_line() -> str:
-    """Payment options in one line: '$5.00 💳 картой / 100 MDL 💰 переводом / 50 Stars ⭐'."""
+    """Payment options in one line: '$5.00 💳 картой / 100 MDL MIA / 400 Stars ⭐'."""
     opts = []
     if config.CARD_ENABLED:
         opts.append(f"{usd(config.CARD_PRICE_CENTS)} \U0001F4B3 картой")
     if config.BOOST_MDL:
-        opts.append(f"{config.BOOST_MDL} MDL \U0001F4B0 переводом")
+        opts.append(f"{config.BOOST_MDL} MDL \U0001F4B0 {transfer_word()}")
     opts.append(f"{config.BOOST_STARS} Stars \u2B50")
     return " / ".join(opts)
 
@@ -112,9 +175,9 @@ def boost_kb(listing_id: int) -> InlineKeyboardMarkup:
         rows.append([InlineKeyboardButton(text=f"\U0001F4B3 Картой {usd(config.CARD_PRICE_CENTS)}",
                                           callback_data=f"card:{listing_id}")])
     if config.BOOST_MDL:
-        # manual transfer: many sellers in MD have no card attached to Telegram, so they
-        # cannot buy Stars at all (PROVIDER_ACCOUNT_INVALID)
-        rows.append([InlineKeyboardButton(text=f"\U0001F4B0 Переводом {config.BOOST_MDL} MDL",
+        # instant transfer in MDL: many sellers in MD have no card attached to Telegram, so they
+        # cannot buy Stars at all (PROVIDER_ACCOUNT_INVALID), and there is no acquiring contract
+        rows.append([InlineKeyboardButton(text=f"\U0001F4B0 {transfer_button()}",
                                           callback_data=f"manual:{listing_id}")])
     rows.append([InlineKeyboardButton(text=f"\u2B50 Оплатить {config.BOOST_STARS} Stars",
                                       callback_data=f"boostpay:{listing_id}")])

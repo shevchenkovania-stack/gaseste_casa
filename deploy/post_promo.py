@@ -13,7 +13,10 @@ from aiogram.enums import ParseMode
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 import config
+import keyboards
 
+# The Boost line comes from keyboards.boost_pitch() — the single source of price copy. A pinned
+# channel post that hardcodes "50 Stars" is the kind of lie a client finds on the first tap.
 TEXT = (
     "\U0001F3E0 <b>Găsește Casa | Chirie</b> — квартиры и дома в Кишинёве\n\n"
     "Сюда бот сам выкладывает каждое одобренное объявление: цена, район, площадь, "
@@ -23,8 +26,7 @@ TEXT = (
     "1\uFE0F\u20E3 открой бота \u2192 «\u2795 Разместить объект»\n"
     "2\uFE0F\u20E3 район, цена, фото, контакт\n"
     "3\uFE0F\u20E3 короткая модерация \u2014 и объявление уже здесь\n\n"
-    f"\U0001F680 Хочешь быть первым в поиске? Boost \u2014 {config.BOOST_DAYS} дней в топе: "
-    f"переводом {config.BOOST_MDL} MDL или {config.BOOST_STARS} Stars \u2B50.\n\n"
+    f"{keyboards.boost_pitch()}\n\n"
     "\U0001F4E3 Перешли этот пост тому, кто сдаёт квартиру."
 )
 

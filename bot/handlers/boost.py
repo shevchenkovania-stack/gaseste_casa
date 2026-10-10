@@ -1,3 +1,4 @@
+import html
 import logging
 
 from aiogram import Bot, F, Router
@@ -125,18 +126,9 @@ async def manual_offer(cb: CallbackQuery) -> None:
     if row["user_id"] != user["id"]:
         await cb.message.answer("Поднять можно только своё объявление.")
         return
-    details = config.PAY_INFO or "реквизиты пришлёт модератор"
     await db.log_event("manual_click", user_id=user["id"], listing_id=listing_id)
-    await cb.message.answer(
-        f"\U0001F4B0 <b>Boost за {config.BOOST_MDL} MDL</b> (объявление #{listing_id}, {config.BOOST_DAYS} дней)\n\n"
-        f"1. Переведи <b>{config.BOOST_MDL} MDL</b>: {details}\n"
-        "   В комментарии укажи номер объявления "
-        f"<b>#{listing_id}</b>.\n"
-        "2. Нажми «Я перевёл» — модератор проверит поступление и поднимет объявление.\n\n"
-        "Обычно подтверждение занимает несколько минут в рабочее время.",
-        parse_mode="HTML",
-        reply_markup=keyboards.manual_kb(listing_id, config.BOOST_MDL),
-    )
+    await cb.message.answer(keyboards.manual_pitch(listing_id), parse_mode="HTML",
+                            reply_markup=keyboards.manual_kb(listing_id, config.BOOST_MDL))
 
 
 @router.callback_query(F.data.startswith("manualpaid:"))
@@ -168,11 +160,20 @@ async def manual_claim(cb: CallbackQuery, bot: Bot) -> None:
     )
     for admin in config.ADMIN_IDS:
         try:
+            # In the bank statement a MIA transfer is identified by the PAYER'S PHONE, and the
+            # owner's phone is already on the listing: so we hand the admin the exact match.
+            expect = (f"с номера <code>{html.escape(row['phone'])}</code>" if row["phone"]
+                      else f"от @{user['username'] or user['tg_id']}")
             await bot.send_message(
                 admin,
-                f"\U0001F4B0 <b>Ожидает подтверждения</b>\nBoost #{listing_id}: "
-                f"{config.BOOST_MDL} MDL переводом\nВладелец: @{user['username'] or user['tg_id']}\n"
+                f"\U0001F4B0 <b>Ожидает подтверждения</b>\n"
+                f"Boost #{listing_id}: <b>{config.BOOST_MDL} MDL</b> "
+                f"({keyboards.transfer_word()}), {config.BOOST_DAYS} дней\n"
+                f"Объявление: #{listing_id}, {row['district'] or '—'}, {row['price']} {row['currency']}\n"
+                f"Платёж жди: {expect}\n"
+                f"Комментарий к платежу: <b>{keyboards.manual_reference(listing_id)}</b>\n"
                 f"boost_id={boost_id}",
+                parse_mode="HTML",
                 reply_markup=keyboards.manual_review_kb(boost_id, listing_id),
             )
         except Exception:

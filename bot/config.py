@@ -20,13 +20,22 @@ PHOTOS_DIR = os.getenv("PHOTOS_DIR", "/opt/imobiliare/data/photos")
 
 DEFAULT_CURRENCY = os.getenv("DEFAULT_CURRENCY", "EUR")
 
-BOOST_STARS = int(os.getenv("BOOST_STARS", "50"))
+# Stars price of one Boost. 400 Stars ~= $5.20 of reward at the documented $0.013/Star, i.e. the
+# same money the card rail costs. 50 (the first value we shipped) was ~$0.65: a ten-times hole.
+BOOST_STARS = int(os.getenv("BOOST_STARS", "400"))
 BOOST_DAYS = int(os.getenv("BOOST_DAYS", "7"))
 
-# Alternative payment rail: bank/card transfer in MDL, confirmed by a human admin.
-# Works in Moldova without acquiring contract and without Telegram Stars. 0 -> disabled.
+# Alternative payment rail: instant transfer in MDL, confirmed by a human admin.
+# In Moldova this is MIA (Schemele Naționale de Plăți Instant, BNM): a P2P transfer to a phone
+# number inside any banking app — no card data entry, no 3-D Secure, no acquiring contract,
+# no merchant account. Money arrives in seconds, the buyer confirms it in the bot, we tick it.
+# 0 -> disabled.
 BOOST_MDL = int(os.getenv("BOOST_MDL", "0"))
-# Recipient details shown to the buyer, e.g. "card 5199 xxxx xxxx xxxx, maib, Ivan P."
+# Recipient phone the buyer sends to via MIA. Set -> the bot leads with the MIA flow.
+PAY_PHONE = os.getenv("PAY_PHONE", "").strip()
+# Name the buyer must see on the confirmation screen of their banking app (trust signal).
+PAY_NAME = os.getenv("PAY_NAME", "").strip()
+# Any other details, free text: card number / IBAN / bank, if you prefer to receive that way.
 PAY_INFO = os.getenv("PAY_INFO", "").strip()
 
 # Rail 3: real card payment (Visa/Mastercard) through Lemon Squeezy as merchant of record.
@@ -59,5 +68,8 @@ WEBAPP_URL = os.getenv("WEBAPP_URL", "").strip()
 BOT_USERNAME = os.getenv("BOT_USERNAME", "").strip()
 BOT_URL = f"https://t.me/{BOT_USERNAME}" if BOT_USERNAME else ""
 
-# Telegram Stars currency code; 1 Star ~= 1 cent. For digital goods inside Telegram.
+# Telegram Stars currency code. Reward value of one Star is $0.013 (Telegram developer terms
+# 6.2.4, checked 11.10.2026), so BOOST_STARS must be read as "stars x 0.013 USD", NOT as cents:
+# 50 Stars was ~$0.65 of reward: almost eight times cheaper than the $5.00 card rail.
+# What the buyer pays to acquire Stars is a different number (app store prices vary by region).
 STARS_CURRENCY = "XTR"

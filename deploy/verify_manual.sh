@@ -5,6 +5,7 @@ cd /opt/imobiliare/bot
 import sys
 sys.path.insert(0, "/opt/imobiliare/bot")
 import config
+import keyboards
 from handlers import boost, admin
 
 def names(handlers):
@@ -14,7 +15,9 @@ def names(handlers):
         out.append(getattr(cb, "__name__", str(cb)))
     return out
 
-print("BOOST_MDL =", config.BOOST_MDL, "| PAY_INFO set:", bool(config.PAY_INFO))
+print("BOOST_MDL =", config.BOOST_MDL, "| PAY_PHONE set:", bool(config.PAY_PHONE),
+      "| PAY_NAME set:", bool(config.PAY_NAME), "| PAY_INFO set:", bool(config.PAY_INFO))
+print("rails:", keyboards.rails_line(), "| кнопка:", keyboards.transfer_button())
 print("boost callback handlers:", names(boost.router.callback_query.handlers))
 print("admin callback handlers:", names(admin.router.callback_query.handlers))
 PYEOF
