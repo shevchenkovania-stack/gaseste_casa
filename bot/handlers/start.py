@@ -17,10 +17,24 @@ WELCOME = (
     "\U0001F916 Размещение <b>бесплатное</b>. Хочешь выделиться — подними объявление через Boost."
 )
 
+if config.CHANNEL_URL:
+    WELCOME += f"\n\U0001F4E3 Все свежие объекты — в канале: {config.CHANNEL_URL}"
+
 
 async def show_menu(target: Message, first_name: str | None = None) -> None:
     text = WELCOME if first_name else "Главное меню:"
     await target.answer(text, parse_mode="HTML", reply_markup=keyboards.main_menu())
+
+
+@router.message(CommandStart(deep_link=True))
+async def cmd_start_deep(message: Message) -> None:
+    """t.me/gaseste_casa_bot?start=<payload> - remember where the user came from."""
+    payload = (message.text or "").partition(" ")[2]
+    u = await db.get_or_create_user(
+        message.from_user.id, message.from_user.username, message.from_user.first_name
+    )
+    await db.log_event("start", user_id=u["id"], meta=payload[:64])
+    await show_menu(message, message.from_user.first_name)
 
 
 @router.message(CommandStart())

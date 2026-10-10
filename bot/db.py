@@ -81,9 +81,20 @@ async def init_db() -> None:
     _conn = await aiosqlite.connect(DB_PATH)
     _conn.row_factory = aiosqlite.Row
     await _conn.execute("PRAGMA journal_mode=WAL")
+    await _conn.execute("PRAGMA busy_timeout=5000")
     await _conn.execute("PRAGMA foreign_keys=ON")
     await _conn.executescript(SCHEMA)
+    await _migrate()
     await _conn.commit()
+
+
+async def _migrate() -> None:
+    """Additive column migrations for tables created before the column existed."""
+    assert _conn is not None
+    cur = await _conn.execute("PRAGMA table_info(listings)")
+    cols = {r["name"] for r in await cur.fetchall()}
+    if "nudged_at" not in cols:
+        await _conn.execute("ALTER TABLE listings ADD COLUMN nudged_at TEXT")
 
 
 async def close_db() -> None:
@@ -253,6 +264,33 @@ async def get_user_listings(user_id: int):
         (user_id,),
     )
     return await cur.fetchall()
+
+
+async def listings_to_nudge(after_days: int, cooldown_days: int, limit: int = 20):
+    """Active listings that are currently NOT boosted and were not nudged recently.
+
+    This is the revenue loop: the owner gets a reminder that Boost makes the
+    listing first in search. Cooldown keeps the reminder from becoming spam.
+    """
+    q = """SELECT * FROM listings
+           WHERE status = 'active'
+             AND (boosted_until IS NULL OR boosted_until <= datetime('now'))
+             AND created_at <= datetime('now', ?)
+             AND (nudged_at IS NULL OR nudged_at <= datetime('now', ?))
+           ORDER BY created_at LIMIT ?"""
+    cur = await _db().execute(q, (f"-{after_days} days", f"-{cooldown_days} days", limit))
+    return await cur.fetchall()
+
+
+async def mark_nudged(listing_id: int) -> None:
+    db = _db()
+    await db.execute("UPDATE listings SET nudged_at = datetime('now') WHERE id = ?", (listing_id,))
+    await db.commit()
+
+
+async def all_user_tg_ids():
+    cur = await _db().execute("SELECT tg_id FROM users ORDER BY id")
+    return [r["tg_id"] for r in await cur.fetchall()]
 
 
 async def log_boost(listing_id: int, user_id: int, stars: int, days: int, status: str = "paid") -> int:

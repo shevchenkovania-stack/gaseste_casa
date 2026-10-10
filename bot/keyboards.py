@@ -20,6 +20,8 @@ def main_menu() -> InlineKeyboardMarkup:
     ]
     if config.WEBAPP_URL:
         kb.insert(1, [InlineKeyboardButton(text="\U0001F5FA\uFE0F Открыть приложение", web_app=WebAppInfo(url=config.WEBAPP_URL))])
+    if config.CHANNEL_URL:
+        kb.append([InlineKeyboardButton(text="\U0001F4E3 Канал с объектами", url=config.CHANNEL_URL)])
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 

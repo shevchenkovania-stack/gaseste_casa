@@ -33,8 +33,11 @@ def contact_kb(row, owner) -> InlineKeyboardMarkup | None:
     if owner and owner["username"]:
         rows.append([InlineKeyboardButton(text="\U0001F4AC Написать в Telegram",
                                          url=f"https://t.me/{owner['username']}")])
-    if config.WEBAPP_URL:
-        rows.append([InlineKeyboardButton(text="\U0001F50D Смотреть все объекты", url=config.WEBAPP_URL)])
+    browse_url = config.WEBAPP_URL or config.CHANNEL_URL
+    if browse_url:
+        rows.append([InlineKeyboardButton(text="\U0001F50D Смотреть все объекты", url=browse_url)])
+    if config.BOT_URL:
+        rows.append([InlineKeyboardButton(text="\u2795 Разместить своё объявление", url=config.BOT_URL)])
     return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
 
 
@@ -53,10 +56,13 @@ async def to_channel(bot: Bot, row) -> None:
     if web_photos:
         media = [InputMediaPhoto(media=p, caption=caption if i == 0 else None, parse_mode="HTML")
                  for i, p in enumerate(web_photos)]
-        await bot.send_media_group(config.CHANNEL_ID, media)
-        await bot.send_message(config.CHANNEL_ID, "↑ контакты и детали ниже", reply_markup=kb)
+        sent = await bot.send_media_group(config.CHANNEL_ID, media)
+        msg = await bot.send_message(config.CHANNEL_ID, "↑ контакты и детали ниже", reply_markup=kb)
+        ids = [m.message_id for m in sent] + [msg.message_id]
     else:
-        await bot.send_message(config.CHANNEL_ID, caption, parse_mode="HTML", reply_markup=kb)
+        msg = await bot.send_message(config.CHANNEL_ID, caption, parse_mode="HTML", reply_markup=kb)
+        ids = [msg.message_id]
+    await db.log_event("channel_post", listing_id=row["id"], meta=",".join(map(str, ids)))
 
 
 async def publish_listing(bot: Bot, row) -> None:

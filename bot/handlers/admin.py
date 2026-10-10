@@ -1,3 +1,5 @@
+import asyncio
+
 from aiogram import Bot, F, Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
@@ -6,6 +8,7 @@ import config
 import db
 import keyboards
 import publish
+import scheduler
 
 router = Router()
 
@@ -69,8 +72,42 @@ async def admin_help(message: Message) -> None:
     if not is_admin(message.from_user.id):
         return
     await message.answer(
-        "Админ-команды:\n/stats — статистика\n/pending — объявления на модерации",
+        "Админ-команды:\n"
+        "/stats — статистика\n"
+        "/pending — объявления на модерации\n"
+        "/nudge — сразу предложить Boost тем, кто не в топе\n"
+        "/broadcast <текст> — рассылка всем пользователям бота",
     )
+
+
+@router.message(Command("nudge"))
+async def nudge_now(message: Message, bot: Bot) -> None:
+    """Force a nudge pass without waiting for the scheduler."""
+    if not is_admin(message.from_user.id):
+        return
+    n = await scheduler.nudge_unboosted(bot)
+    await message.answer(f"Предложений Boost отправлено: {n}")
+
+
+@router.message(Command("broadcast"))
+async def broadcast(message: Message, bot: Bot) -> None:
+    if not is_admin(message.from_user.id):
+        return
+    text = (message.text or "").partition("\n")[2].strip()
+    if not text:
+        await message.answer("Использование: /broadcast <текст>")
+        return
+    ids = [tg for tg in await db.all_user_tg_ids() if tg not in config.ADMIN_IDS]
+    ok = 0
+    for tg in ids:
+        try:
+            await bot.send_message(tg, text, parse_mode="HTML", reply_markup=keyboards.main_menu())
+            ok += 1
+        except Exception:
+            pass  # blocked the bot
+        await asyncio.sleep(0.05)
+    await db.log_event("broadcast", user_id=message.from_user.id, meta=f"{ok}/{len(ids)}")
+    await message.answer(f"Рассылка готова: доставлено {ok} из {len(ids)}.")
 
 
 @router.message(Command("pending"))

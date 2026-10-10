@@ -23,12 +23,22 @@ DEFAULT_CURRENCY = os.getenv("DEFAULT_CURRENCY", "EUR")
 BOOST_STARS = int(os.getenv("BOOST_STARS", "50"))
 BOOST_DAYS = int(os.getenv("BOOST_DAYS", "7"))
 
+# Revenue loop: remind owners of unboosted active listings to buy a Boost.
+NUDGE_AFTER_DAYS = int(os.getenv("NUDGE_AFTER_DAYS", "2"))
+NUDGE_COOLDOWN_DAYS = int(os.getenv("NUDGE_COOLDOWN_DAYS", "4"))
+NUDGE_INTERVAL_HOURS = int(os.getenv("NUDGE_INTERVAL_HOURS", "6"))
+
 CONTACT_URL = os.getenv("CONTACT_URL", "")
 
 # Public channel where approved listings are auto-posted (@username or -100... chat id)
 CHANNEL_ID = os.getenv("CHANNEL_ID", "").strip() or None
+# t.me link derived from CHANNEL_ID when it is a public @username (empty otherwise)
+CHANNEL_URL = f"https://t.me/{CHANNEL_ID[1:]}" if CHANNEL_ID and CHANNEL_ID.startswith("@") else ""
 # HTTPS URL of the Telegram Mini App (webapp/). Empty -> app button hidden.
 WEBAPP_URL = os.getenv("WEBAPP_URL", "").strip()
+# Public username, used for "post your own listing" CTAs in channel posts.
+BOT_USERNAME = os.getenv("BOT_USERNAME", "").strip()
+BOT_URL = f"https://t.me/{BOT_USERNAME}" if BOT_USERNAME else ""
 
 # Telegram Stars currency code; 1 Star ~= 1 cent. For digital goods inside Telegram.
 STARS_CURRENCY = "XTR"

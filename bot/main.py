@@ -8,6 +8,7 @@ from aiogram.types import BotCommand
 
 import config
 import db
+import scheduler
 from handlers import add, admin, boost, browse, profile, start
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -48,10 +49,14 @@ async def main() -> None:
         except Exception:
             pass
 
+    job = None
     try:
         await bot.delete_webhook(drop_pending_updates=True)
+        job = asyncio.create_task(scheduler.run(bot))
         await dp.start_polling(bot)
     finally:
+        if job is not None:
+            job.cancel()
         await db.close_db()
         await bot.session.close()
 
