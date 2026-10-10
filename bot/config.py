@@ -23,6 +23,12 @@ DEFAULT_CURRENCY = os.getenv("DEFAULT_CURRENCY", "EUR")
 BOOST_STARS = int(os.getenv("BOOST_STARS", "50"))
 BOOST_DAYS = int(os.getenv("BOOST_DAYS", "7"))
 
+# Alternative payment rail: bank/card transfer in MDL, confirmed by a human admin.
+# Works in Moldova without acquiring contract and without Telegram Stars. 0 -> disabled.
+BOOST_MDL = int(os.getenv("BOOST_MDL", "0"))
+# Recipient details shown to the buyer, e.g. "card 5199 xxxx xxxx xxxx, maib, Ivan P."
+PAY_INFO = os.getenv("PAY_INFO", "").strip()
+
 # Revenue loop: remind owners of unboosted active listings to buy a Boost.
 NUDGE_AFTER_DAYS = int(os.getenv("NUDGE_AFTER_DAYS", "2"))
 NUDGE_COOLDOWN_DAYS = int(os.getenv("NUDGE_COOLDOWN_DAYS", "4"))

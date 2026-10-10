@@ -36,7 +36,8 @@ async def nudge_unboosted(bot: Bot) -> int:
         try:
             await bot.send_message(
                 owner["tg_id"], text, parse_mode="HTML",
-                reply_markup=keyboards.boost_kb(row["id"], config.BOOST_STARS, config.BOOST_DAYS),
+                reply_markup=keyboards.boost_kb(row["id"], config.BOOST_STARS,
+                                                config.BOOST_DAYS, config.BOOST_MDL),
             )
         except Exception as e:  # blocked / deleted chat: don't retry forever
             log.info("nudge skipped #%s (user %s): %s", row["id"], owner["tg_id"], e)

@@ -19,15 +19,20 @@ async def offer_flow(target: Message, from_user, listing_id: int) -> None:
         await target.answer("Поднять можно только своё объявление.")
         return
     await db.log_event("boost_click", user_id=user["id"], listing_id=listing_id)
+    extra = ""
+    if config.BOOST_MDL:
+        extra = (f"\nИли переводом: <b>{config.BOOST_MDL} MDL</b> на карту \u2014 "
+                 "кнопка «\U0001F4B0 Переводом» ниже.\n")
     text = (
         f"\U0001F680 <b>Boost объявления #{listing_id}</b>\n\n"
         f"Твоё объявление будет показываться <b>первым</b> в поиске и выделяться \u2B50 "
         f"в течение <b>{config.BOOST_DAYS} дней</b>.\n\n"
         f"Стоимость: <b>{config.BOOST_STARS} Telegram Stars</b> \u2B50\n"
-        "Оплата проходит внутри Telegram, безопасно."
+        "Оплата проходит внутри Telegram, безопасно.\n" + extra
     )
     await target.answer(text, parse_mode="HTML",
-                        reply_markup=keyboards.boost_kb(listing_id, config.BOOST_STARS, config.BOOST_DAYS))
+                        reply_markup=keyboards.boost_kb(listing_id, config.BOOST_STARS,
+                                                        config.BOOST_DAYS, config.BOOST_MDL))
 
 
 @router.callback_query(F.data.startswith("boost:"))
@@ -65,10 +70,81 @@ async def pre_checkout(q: PreCheckoutQuery) -> None:
     await q.answer(ok=True)
 
 
+@router.callback_query(F.data.startswith("manual:"))
+async def manual_offer(cb: CallbackQuery) -> None:
+    """Second payment rail: card/bank transfer in MDL, confirmed manually."""
+    listing_id = int(cb.data.split(":", 1)[1])
+    await cb.answer()
+    if not config.BOOST_MDL:
+        await cb.message.answer("Оплата переводом сейчас недоступна.")
+        return
+    row = await db.get_listing(listing_id)
+    if not row:
+        await cb.message.answer("Объявление не найдено.")
+        return
+    user = await db.get_or_create_user(cb.from_user.id, cb.from_user.username, cb.from_user.first_name)
+    if row["user_id"] != user["id"]:
+        await cb.message.answer("Поднять можно только своё объявление.")
+        return
+    details = config.PAY_INFO or "реквизиты пришлёт модератор"
+    await db.log_event("manual_click", user_id=user["id"], listing_id=listing_id)
+    await cb.message.answer(
+        f"\U0001F4B0 <b>Boost за {config.BOOST_MDL} MDL</b> (объявление #{listing_id}, {config.BOOST_DAYS} дней)\n\n"
+        f"1. Переведи <b>{config.BOOST_MDL} MDL</b>: {details}\n"
+        "   В комментарии укажи номер объявления "
+        f"<b>#{listing_id}</b>.\n"
+        "2. Нажми «Я перевёл» — модератор проверит поступление и поднимет объявление.\n\n"
+        "Обычно подтверждение занимает несколько минут в рабочее время.",
+        parse_mode="HTML",
+        reply_markup=keyboards.manual_kb(listing_id, config.BOOST_MDL),
+    )
+
+
+@router.callback_query(F.data.startswith("manualpaid:"))
+async def manual_claim(cb: CallbackQuery, bot: Bot) -> None:
+    """Buyer says the transfer is done -> create a pending record and ask admins."""
+    listing_id = int(cb.data.split(":", 1)[1])
+    await cb.answer()
+    row = await db.get_listing(listing_id)
+    if not row:
+        await cb.message.answer("Объявление не найдено.")
+        return
+    user = await db.get_or_create_user(cb.from_user.id, cb.from_user.username, cb.from_user.first_name)
+    if row["user_id"] != user["id"]:
+        await cb.message.answer("Поднять можно только своё объявление.")
+        return
+    if await db.find_boost(listing_id, "manual_pending"):
+        await cb.message.answer("Твой платёж уже на проверке. Ожидай \u23F3")
+        return
+    # boosts.stars is reused as "agreed amount in the payment currency" for manual claims
+    boost_id = await db.log_boost(listing_id, user["id"], config.BOOST_MDL, config.BOOST_DAYS,
+                                  status="manual_pending")
+    await db.log_event("manual_payment_claim", user_id=user["id"], listing_id=listing_id,
+                       meta=str(config.BOOST_MDL))
+    await cb.message.edit_reply_markup(reply_markup=None)
+    await cb.message.answer(
+        "\U0001F4E4 Принято. Проверяю поступление \u2014 как только деньги придут, "
+        f"объявление #{listing_id} поднимется в топ и ты получишь сообщение.",
+        reply_markup=keyboards.main_menu(),
+    )
+    for admin in config.ADMIN_IDS:
+        try:
+            await bot.send_message(
+                admin,
+                f"\U0001F4B0 <b>Ожидает подтверждения</b>\nBoost #{listing_id}: "
+                f"{config.BOOST_MDL} MDL переводом\nВладелец: @{user['username'] or user['tg_id']}\n"
+                f"boost_id={boost_id}",
+                reply_markup=keyboards.manual_review_kb(boost_id, listing_id),
+            )
+        except Exception:
+            pass
+
+
 @router.message(F.successful_payment)
 async def on_paid(message: Message, bot: Bot) -> None:
     sp = message.successful_payment
     payload = sp.invoice_payload or ""
+    is_test = sp.currency == "XTEST"  # test invoice: chain is real, money is not
     user = await db.get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
     if payload.startswith("boost:"):
         listing_id = int(payload.split(":", 1)[1])
@@ -76,20 +152,27 @@ async def on_paid(message: Message, bot: Bot) -> None:
         await db.boost_listing(listing_id, days)
         await db.log_boost(listing_id, user["id"], sp.total_amount, days, status="paid")
         await db.log_payment(
-            user_id=user["id"], listing_id=listing_id, purpose="boost",
+            user_id=user["id"], listing_id=listing_id,
+            purpose="boost_test" if is_test else "boost",
             stars=sp.total_amount, currency=sp.currency,
             telegram_charge_id=sp.telegram_payment_charge_id,
             provider_charge_id=sp.provider_payment_charge_id,
         )
-        await db.log_event("boost_paid", user_id=user["id"], listing_id=listing_id, meta=str(sp.total_amount))
+        await db.log_event("test_paid" if is_test else "boost_paid",
+                           user_id=user["id"], listing_id=listing_id, meta=str(sp.total_amount))
+        tag = "\U0001F9EA Тестовый платёж принят. " if is_test else "\u2705 Оплата получена! "
         await message.answer(
-            f"\u2705 Оплата получена! Объявление <b>#{listing_id}</b> поднято на <b>{days} дней</b> \U0001F680",
+            f"{tag}Объявление <b>#{listing_id}</b> поднято на <b>{days} дней</b> \U0001F680",
             parse_mode="HTML",
             reply_markup=keyboards.main_menu(),
         )
         for admin in config.ADMIN_IDS:
             try:
-                await bot.send_message(admin, f"\U0001F4B0 <b>Новый платёж</b>\nBoost #{listing_id}: {sp.total_amount} Stars")
+                label = "ТЕСТ (XTEST)" if is_test else "Telegram Stars"
+                await bot.send_message(
+                    admin,
+                    f"\U0001F4B0 <b>Новый платёж</b>\nBoost #{listing_id}: {sp.total_amount} {label}",
+                )
             except Exception:
                 pass
     else:

@@ -16,7 +16,7 @@
 - [x] VPS живой, SSH-доступ есть, ufw активен (снаружи открыт только :22)
 - [x] `imobiliare.service` — бот `@gaseste_casa_bot`, active, polling
 - [x] `imobiliare-web.service` — Mini App API, active, `127.0.0.1:8085` → `{"active":N}`
-- [x] `.env` на сервере: BOT_TOKEN, ADMIN_IDS, DB_PATH, DEFAULT_CURRENCY, BOOST_STARS=50, BOOST_DAYS=7, **CHANNEL_ID=@gaseste_casa**, BOT_USERNAME, WEBAPP_URL (пусто), NUDGE_*
+- [x] `.env` на сервере: BOT_TOKEN, ADMIN_IDS, DB_PATH, DEFAULT_CURRENCY, BOOST_STARS=50, BOOST_DAYS=7, BOOST_MDL=100, **PAY_INFO (пусто)**, CHANNEL_ID=@gaseste_casa, BOT_USERNAME, WEBAPP_URL (пусто), NUDGE_*
 - [x] Код на сервере = локальный (деплой копированием файлов через scp, git на сервере нет)
 
 ### Бот (`bot/`)
@@ -24,12 +24,13 @@
 - [x] `/start`, `/menu`, справка, поиск с фильтрами и пагинацией, просмотр карточки, контакт владельца
 - [x] Добавление объявления: FSM 11 шагов, фото, подтверждение, уведомление админам
 - [x] Модерация approve/reject → уведомление владельцу + **автопубликация в канал** (`publish.py`)
-- [x] **Boost**: оффер → `send_invoice` (XTR) → pre_checkout → `successful_payment` → `boosts`/`payments` + отчёт админу
+- [x] **Boost, рельс 1 — Telegram Stars**: оффер → `send_invoice` (XTR) → pre_checkout → `successful_payment` → `boosts`/`payments` + отчёт админу
+- [x] **Boost, рельс 2 — перевод MDL** (работает без карты в Telegram и без эквайринга): «Переводом 100 MDL» → реквизиты (`PAY_INFO`) → «Я перевёл» → заявка админу (`manual_pending`) → «Деньги пришли» → Boost + `payments (currency='MDL')`; `/stats` разводит Stars и MDL
 - [x] Deep link `/startapp boost:<id>` из Mini App; `?start=<метка>` пишет источник в `events.start.meta`
 - [x] **Двигатель выручки** (`scheduler.py`): раз в 6 ч находит активные необустленные объявления старше 2 дней и шлёт владельцу ЛС с кнопкой оплаты; кулдаун 4 дня (`listings.nudged_at`, миграция автоматическая)
 - [x] Админ-команды: `/stats`, `/pending`, `/nudge`, `/broadcast`
 - [x] Публичный канал `t.me/gaseste_casa`: бот-админ, автопостинг, кнопки «Написать владельцу» / «Все объекты» / «➕ Разместить своё», закреплён пост-визитка
-- [x] События в `events`: `start`, `listing_created`, `moderation_*`, `channel_post`, `web_view`, `web_contact`, `boost_click`, `boost_nudge`, `boost_payment_attempt`, `boost_paid`, `broadcast`
+- [x] События в `events`: `start`, `listing_created`, `moderation_*`, `channel_post`, `web_view`, `web_contact`, `boost_click`, `boost_nudge`, `boost_payment_attempt`, `boost_paid`, `manual_click`, `manual_payment_claim`, `boost_manual_paid`, `broadcast`
 
 ### Mini App (`bot/webapp/`)
 
@@ -39,7 +40,7 @@
 
 ### Деплой (`deploy/`)
 
-- [x] `apply_nudge.sh`, `status.sh`, `verify_nudge.sh`, `cleanup_test.sh` — приложить/проверить прод одной командой
+- [x] `apply_nudge.sh`, `apply_manual.sh`, `status.sh`, `verify_nudge.sh`, `verify_manual.sh`, `cleanup_test.sh` — приложить/проверить прод одной командой
 - [x] `test_money_path.py` — бой-тест напоминания о Boost; `make_demo.py` — ДЕМО-карточка + настоящий оффер с кнопкой оплаты; `post_promo.py` — пост-визитка в канал
 - [x] `imobiliare-web.service`, `nginx-chirie.conf` (шаблон, ждёт домен)
 
@@ -49,7 +50,8 @@
 
 ### Критично для первого платежа
 
-- [ ] **Денег нет.** `REAL_REVENUE = 0`. Payment-рельс (Telegram Stars) реализован и работает, но **ни кто не нажал «Оплатить»** — подтверждения доставки/списания Stars нет.
+- [ ] **Денег нет.** `REAL_REVENUE = 0`. Оба рельса настроены, но ни один платёж не подтверждён. Рельс 1 (Stars) упирается не в код, а в покупателя: без карты, привязанной к Telegram, покупка звёзд отдаёт `PROVIDER_ACCOUNT_INVALID`, а тестовые XTEST-инвойсы прод-боту запрещены (`PAYMENT_PROVIDER_INVALID`) — значит Stars-путь проверяется только реальным покупателем с картой.
+- [ ] **Рельс 2 не заполнен:** `PAY_INFO` пустой — покупатель видит «реквизиты пришлёт модератор». Нужно вписать карту/счёт в `.env`.
 - [ ] **Доска пуста**: listings = 1 (ДЕМО-карточка #8 для теста кассы), реальных объявлений **0**, boosts 0, payments 0. Без объектов Boost продавать нечего — это главный блокер, а не код.
 - [ ] **Нет источника легальных объявлений** (50–100 объектов). Scraping 999.md запрещён миссией (ToS + чужие фото).
 - [ ] **AI не используется** (классификация, нормализация, дедуп, генерация описаний).
@@ -74,17 +76,18 @@
 
 ## 📌 СЛЕДУЮЩИЕ ШАГИ
 
-1. **Человек:** тапнуть «⭐ Оплатить 50 Stars» в ЛС от бота (ДЕМО #8) → подтвердить кассу, `revenue_stars > 0`
-2. **Человек:** привести 3–5 реальных объявлений (шаблоны в `GROWTH.md`, ссылки с `?start=`)
-3. Реестр источников трафика → после 5 оплат поднимать цену Boost (150 Stars)
-4. Домен + A-запись → nginx + certbot → `WEBAPP_URL` → включить Mini App и кнопку в боте
-5. Бэкап БД (cron `sqlite3 .backup` + ротация) и отдельный пользователь под сервисы
-6. Эквайринг MDL (maib/bpay/Fastpay) — нужен ÎI/SRL, отдельный человеческий шаг
+1. **Человек:** вписать `PAY_INFO` (карта/счёт для перевода MDL) в `/opt/imobiliare/bot/.env` и перезапустить `imobiliare` — иначе покупатель не видит реквизитов
+2. **Человек:** прогнать тест рельса 2 без денег: ДЕМО #8 → «💸 Переводом 100 MDL» → «Я перевёл» → админ-заявка → «✅ Деньги пришли» → Boost активится, `/stats` покажет 100 MDL
+3. **Человек:** привести 3–5 реальных объявлений (шаблоны в `GROWTH.md`, ссылки с `?start=`)
+4. Реестр источников трафика → после 5 оплат поднимать цену Boost
+5. Домен + A-запись → nginx + certbot → `WEBAPP_URL` → включить Mini App и кнопку в боте
+6. Бэкап БД (cron `sqlite3 .backup` + ротация) и отдельный пользователь под сервисы
+7. Эквайринг MDL (maib/bpay/Fastpay) или звёзды через покупателя с картой — нужен ÎI/SRL, отдельный человеческий шаг
 
 ## КРИТЕРИИ УСПЕХА (MISSION.md §18)
 
 - [x] продукт работает (бот + канал + напоминания; Mini App — без публичного HTTPS)
-- [x] реальное платное предложение настроено (Boost 50 Stars / 7 дней)
+- [x] реальное платное предложение настроено (Boost: 50 Stars / 100 MDL на 7 дней)
 - [ ] реальные пользователи и реальные объявления
 - [ ] произошла реальная покупка / деньги поступили
 - [x] система работает автономно (модерация → канал → нудж → оплата) — подтверждается первым платежом

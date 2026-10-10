@@ -95,6 +95,11 @@ async def _migrate() -> None:
     cols = {r["name"] for r in await cur.fetchall()}
     if "nudged_at" not in cols:
         await _conn.execute("ALTER TABLE listings ADD COLUMN nudged_at TEXT")
+    cur = await _conn.execute("PRAGMA table_info(payments)")
+    cols = {r["name"] for r in await cur.fetchall()}
+    if "amount" not in cols:
+        # manual bank transfers are priced in real MDL, not Stars
+        await _conn.execute("ALTER TABLE payments ADD COLUMN amount REAL")
 
 
 async def close_db() -> None:
@@ -303,14 +308,34 @@ async def log_boost(listing_id: int, user_id: int, stars: int, days: int, status
     return cur.lastrowid
 
 
+async def get_boost(boost_id: int):
+    cur = await _db().execute("SELECT * FROM boosts WHERE id = ?", (boost_id,))
+    return await cur.fetchone()
+
+
+async def find_boost(listing_id: int, status: str):
+    cur = await _db().execute(
+        "SELECT * FROM boosts WHERE listing_id = ? AND status = ? ORDER BY id DESC LIMIT 1",
+        (listing_id, status),
+    )
+    return await cur.fetchone()
+
+
+async def set_boost_status(boost_id: int, status: str) -> None:
+    db = _db()
+    await db.execute("UPDATE boosts SET status = ? WHERE id = ?", (status, boost_id))
+    await db.commit()
+
+
 async def log_payment(user_id: int, listing_id: int | None, purpose: str, stars: int,
-                      currency: str, telegram_charge_id: str, provider_charge_id: str | None) -> None:
+                      currency: str, telegram_charge_id: str, provider_charge_id: str | None,
+                      amount: float | None = None) -> None:
     db = _db()
     await db.execute(
         """INSERT INTO payments
-           (user_id, listing_id, purpose, stars, currency, telegram_charge_id, provider_charge_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (user_id, listing_id, purpose, stars, currency, telegram_charge_id, provider_charge_id),
+           (user_id, listing_id, purpose, stars, currency, telegram_charge_id, provider_charge_id, amount)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (user_id, listing_id, purpose, stars, currency, telegram_charge_id, provider_charge_id, amount),
     )
     await db.commit()
 
@@ -332,9 +357,12 @@ async def stats() -> dict:
         "listings": "SELECT COUNT(*) c FROM listings",
         "active": "SELECT COUNT(*) c FROM listings WHERE status='active'",
         "pending": "SELECT COUNT(*) c FROM listings WHERE status='pending'",
-        "boosts": "SELECT COUNT(*) c FROM boosts WHERE status='paid'",
+        "boosts": "SELECT COUNT(*) c FROM boosts WHERE status IN ('paid','manual')",
         "payments": "SELECT COUNT(*) c FROM payments",
-        "revenue_stars": "SELECT COALESCE(SUM(stars),0) c FROM payments",
+        # REAL_REVENUE must stay honest: XTEST test invoices are excluded
+        "revenue_stars": "SELECT COALESCE(SUM(stars),0) c FROM payments WHERE currency='XTR'",
+        "revenue_mdl": "SELECT COALESCE(SUM(amount),0) c FROM payments WHERE currency='MDL'",
+        "test_payments": "SELECT COUNT(*) c FROM payments WHERE currency = 'XTEST'",
     }.items():
         cur = await db.execute(q)
         row = await cur.fetchone()

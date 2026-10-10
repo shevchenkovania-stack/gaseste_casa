@@ -2,7 +2,7 @@ import asyncio
 
 from aiogram import Bot, F, Router
 from aiogram.filters import Command
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, LabeledPrice, Message
 
 import config
 import db
@@ -51,6 +51,63 @@ async def moderate(cb: CallbackQuery, bot: Bot) -> None:
             pass
 
 
+@router.callback_query(F.data.startswith("manapp:") | F.data.startswith("manrej:"))
+async def manual_review(cb: CallbackQuery, bot: Bot) -> None:
+    """Admin confirms a manual MDL transfer (manapp) or rejects it (manrej)."""
+    if not is_admin(cb.from_user.id):
+        await cb.answer("Нет доступа", show_alert=True)
+        return
+    action, sid = cb.data.split(":", 1)
+    boost_id = int(sid)
+    boost = await db.get_boost(boost_id)
+    await cb.answer()
+    if not boost:
+        await cb.message.answer("Заявка не найдена (возможно, уже обработана).")
+        return
+    if boost["status"] != "manual_pending":
+        await cb.message.answer(f"Заявка уже в статусе «{boost['status']}».")
+        return
+    listing_id = boost["listing_id"]
+    owner = await db.get_user_by_id(boost["user_id"])
+    await cb.message.edit_reply_markup(reply_markup=None)
+
+    if action == "manapp":
+        await db.set_boost_status(boost_id, "manual")
+        await db.boost_listing(listing_id, boost["days"])
+        # boosts.stars holds the agreed MDL price for manual claims (set at claim time)
+        amount_mdl = float(boost["stars"] or config.BOOST_MDL)
+        await db.log_payment(user_id=boost["user_id"], listing_id=listing_id, purpose="boost_manual",
+                             stars=0, currency="MDL", telegram_charge_id=f"manual:{boost_id}",
+                             provider_charge_id=None, amount=amount_mdl)
+        await db.log_event("boost_manual_paid", user_id=boost["user_id"], listing_id=listing_id,
+                           meta=str(int(amount_mdl)))
+        await cb.message.answer(f"✅ Boost #{listing_id} активирован на {boost['days']} дней. "
+                                f"Сумма: {int(amount_mdl)} MDL.")
+        if owner:
+            try:
+                await bot.send_message(
+                    owner["tg_id"],
+                    f"\U0001F4B0 Платёж получен, спасибо!\nОбъявление <b>#{listing_id}</b> "
+                    f"поднято в топ на <b>{boost['days']} дней</b> \U0001F680",
+                    parse_mode="HTML", reply_markup=keyboards.main_menu(),
+                )
+            except Exception:
+                pass
+    else:
+        await db.set_boost_status(boost_id, "manual_rejected")
+        await cb.message.answer(f"❌ Платёж по заявке #{boost_id} отклонён.")
+        if owner:
+            try:
+                await bot.send_message(
+                    owner["tg_id"],
+                    "⚠️ Деньги не нашли на счёте. Проверь реквизиты и комментарий к переводу "
+                    f"и нажми «Я перевёл» ещё раз по объявлению #{listing_id}.",
+                    reply_markup=keyboards.main_menu(),
+                )
+            except Exception:
+                pass
+
+
 @router.message(Command("stats"))
 async def stats(message: Message) -> None:
     if not is_admin(message.from_user.id):
@@ -61,8 +118,9 @@ async def stats(message: Message) -> None:
         f"Пользователи: {s['users']}\n"
         f"Объявлений: {s['listings']} (активных {s['active']}, на модерации {s['pending']})\n"
         f"Boost'ов: {s['boosts']}\n"
-        f"Платежей: {s['payments']}\n"
-        f"REAL_REVENUE (Stars \u2B50): <b>{s['revenue_stars']}</b>"
+        f"Платежей: {s['payments']} (тестовых: {s['test_payments']})\n"
+        f"REAL_REVENUE Stars \u2B50: <b>{s['revenue_stars']}</b>\n"
+        f"REAL_REVENUE MDL \U0001F4B0: <b>{s['revenue_mdl']}</b>"
     )
     await message.answer(text, parse_mode="HTML")
 
@@ -76,6 +134,7 @@ async def admin_help(message: Message) -> None:
         "/stats — статистика\n"
         "/pending — объявления на модерации\n"
         "/nudge — сразу предложить Boost тем, кто не в топе\n"
+        "/testpay [id] — тестовый счёт XTEST (проверить кассу без карты)\n"
         "/broadcast <текст> — рассылка всем пользователям бота",
     )
 

@@ -49,13 +49,15 @@ async def main() -> None:
 
     text = (
         f"\U0001F680 <b>Boost объявления #{listing_id}</b> (ДЕМО)\n\n"
-        "Это тестовая карточка: нажми кнопку ниже и проверь кассу — оплату "
-        "Telegram Stars, начисление Boost и отчёт себе как админу.\n\n"
-        f"Цена: <b>{config.BOOST_STARS} Stars</b> \u2B50 (около 12 леев).\n"
-        "Отмену и возврат \u2014 через поддержку Telegram Stars."
+        "Это тестовая карточка: нажми кнопку ниже и проверь кассу от и до — "
+        "начисление Boost и отчёт себе как админу.\n\n"
+        f"• Telegram Stars: <b>{config.BOOST_STARS} Stars</b> \u2B50 (нужна карта, привязанная к Telegram)\n"
+        f"• Переводом: <b>{config.BOOST_MDL} MDL</b> — «\U0001F4B0 Переводом» → «Я перевёл» → "
+        "подтверждение админом (работает без карты и без эквайринга)"
     )
     await bot.send_message(ADMIN_TG, text,
-                           reply_markup=keyboards.boost_kb(listing_id, config.BOOST_STARS, config.BOOST_DAYS))
+                           reply_markup=keyboards.boost_kb(listing_id, config.BOOST_STARS,
+                                                           config.BOOST_DAYS, config.BOOST_MDL))
     print("demo listing:", listing_id, "| offer sent to", ADMIN_TG)
 
     await db.close_db()
