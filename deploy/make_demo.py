@@ -51,9 +51,9 @@ async def main() -> None:
         f"\U0001F680 <b>Boost объявления #{listing_id}</b> (ДЕМО)\n\n"
         "Это тестовая карточка: нажми кнопку ниже и проверь кассу от и до — "
         "начисление Boost и отчёт себе как админу.\n\n"
-        f"• Telegram Stars: <b>{config.BOOST_STARS} Stars</b> \u2B50 (нужна карта, привязанная к Telegram)\n"
         f"• Переводом: <b>{config.BOOST_MDL} MDL</b> — «\U0001F4B0 Переводом» → «Я перевёл» → "
-        "подтверждение админом (работает без карты и без эквайринга)"
+        "подтверждение админом (работает без карты и без эквайринга)\n"
+        f"• Telegram Stars: <b>{config.BOOST_STARS} Stars</b> \u2B50 (нужна карта, привязанная к Telegram)"
     )
     await bot.send_message(ADMIN_TG, text,
                            reply_markup=keyboards.boost_kb(listing_id, config.BOOST_STARS,

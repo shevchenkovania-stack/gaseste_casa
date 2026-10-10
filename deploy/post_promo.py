@@ -23,7 +23,8 @@ TEXT = (
     "1\uFE0F\u20E3 открой бота \u2192 «\u2795 Разместить объект»\n"
     "2\uFE0F\u20E3 район, цена, фото, контакт\n"
     "3\uFE0F\u20E3 короткая модерация \u2014 и объявление уже здесь\n\n"
-    "\U0001F680 Хочешь быть первым в поиске? Boost \u2014 50 Stars \u2B50 на 7 дней.\n\n"
+    f"\U0001F680 Хочешь быть первым в поиске? Boost \u2014 {config.BOOST_DAYS} дней в топе: "
+    f"переводом {config.BOOST_MDL} MDL или {config.BOOST_STARS} Stars \u2B50.\n\n"
     "\U0001F4E3 Перешли этот пост тому, кто сдаёт квартиру."
 )
 
@@ -37,6 +38,13 @@ async def main() -> None:
     if not config.CHANNEL_ID:
         sys.exit("CHANNEL_ID is not set")
     bot = Bot(config.BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    if len(sys.argv) > 1:  # edit the existing pinned card instead of posting a duplicate
+        mid = int(sys.argv[1])
+        await bot.edit_message_text(TEXT, chat_id=config.CHANNEL_ID, message_id=mid,
+                                    reply_markup=KB)
+        print("edited message_id:", mid)
+        await bot.session.close()
+        return
     msg = await bot.send_message(config.CHANNEL_ID, TEXT, reply_markup=KB)
     print("posted message_id:", msg.message_id)
     try:

@@ -76,7 +76,7 @@ async def cb_help(cb: CallbackQuery) -> None:
         "\u2795 <b>Разместить объект</b> — добавить своё объявление (бесплатно).\n"
         "\U0001F4CB <b>Мои объявления</b> — управлять своими объектами и поднимать их.\n\n"
         "\U0001F680 <b>Boost</b> — платное поднятие объявления в топ выдачи.\n"
-        "Оплата Telegram Stars \u2B50 (быстро и безопасно).\n\n"
+        f"Оплата: переводом {config.BOOST_MDL} MDL на карту или {config.BOOST_STARS} Telegram Stars \u2B50.\n\n"
         "Объявления проходят короткую модерацию."
     )
     await cb.message.answer(text, parse_mode="HTML", reply_markup=keyboards.back_menu())
@@ -93,7 +93,7 @@ async def cmd_paysupport(message: Message) -> None:
     import config
     contact = config.CONTACT_URL or "@support"
     await message.answer(
-        f"Вопросы и возвраты по оплате (Telegram Stars): {contact}",
+        f"Вопросы и возвраты по оплате (перевод MDL / Telegram Stars): {contact}",
         reply_markup=keyboards.back_menu(),
     )
 

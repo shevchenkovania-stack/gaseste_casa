@@ -19,17 +19,23 @@ async def offer_flow(target: Message, from_user, listing_id: int) -> None:
         await target.answer("Поднять можно только своё объявление.")
         return
     await db.log_event("boost_click", user_id=user["id"], listing_id=listing_id)
-    extra = ""
     if config.BOOST_MDL:
-        extra = (f"\nИли переводом: <b>{config.BOOST_MDL} MDL</b> на карту \u2014 "
-                 "кнопка «\U0001F4B0 Переводом» ниже.\n")
-    text = (
-        f"\U0001F680 <b>Boost объявления #{listing_id}</b>\n\n"
-        f"Твоё объявление будет показываться <b>первым</b> в поиске и выделяться \u2B50 "
-        f"в течение <b>{config.BOOST_DAYS} дней</b>.\n\n"
-        f"Стоимость: <b>{config.BOOST_STARS} Telegram Stars</b> \u2B50\n"
-        "Оплата проходит внутри Telegram, безопасно.\n" + extra
-    )
+        text = (
+            f"\U0001F680 <b>Boost объявления #{listing_id}</b>\n\n"
+            f"Твоё объявление будет показываться <b>первым</b> в поиске и выделяться \u2B50 "
+            f"в течение <b>{config.BOOST_DAYS} дней</b>.\n\n"
+            f"\U0001F4B0 Переводом: <b>{config.BOOST_MDL} MDL</b> на карту — кнопка ниже, "
+            "подтверждаем вручную за несколько минут.\n"
+            f"\u2B50 Или {config.BOOST_STARS} Telegram Stars (нужны уже купленные звёзды)."
+        )
+    else:
+        text = (
+            f"\U0001F680 <b>Boost объявления #{listing_id}</b>\n\n"
+            f"Твоё объявление будет показываться <b>первым</b> в поиске и выделяться \u2B50 "
+            f"в течение <b>{config.BOOST_DAYS} дней</b>.\n\n"
+            f"Стоимость: <b>{config.BOOST_STARS} Telegram Stars</b> \u2B50\n"
+            "Оплата проходит внутри Telegram, безопасно."
+        )
     await target.answer(text, parse_mode="HTML",
                         reply_markup=keyboards.boost_kb(listing_id, config.BOOST_STARS,
                                                         config.BOOST_DAYS, config.BOOST_MDL))

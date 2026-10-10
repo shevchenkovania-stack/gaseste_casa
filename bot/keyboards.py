@@ -83,9 +83,12 @@ def listing_kb(listing_id: int, owner: bool, boosted: bool) -> InlineKeyboardMar
 
 
 def boost_kb(listing_id: int, stars: int, days: int, mdl: int = 0) -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton(text=f"\u2B50 Оплатить {stars} Stars", callback_data=f"boostpay:{listing_id}")]]
+    rows = []
     if mdl:
+        # MDL transfer first: many buyers in MD have no card attached to Telegram,
+        # so they cannot buy Stars at all (PROVIDER_ACCOUNT_INVALID).
         rows.append([InlineKeyboardButton(text=f"\U0001F4B0 Переводом {mdl} MDL", callback_data=f"manual:{listing_id}")])
+    rows.append([InlineKeyboardButton(text=f"\u2B50 Оплатить {stars} Stars", callback_data=f"boostpay:{listing_id}")])
     rows.append([InlineKeyboardButton(text="\u2b05\uFE0F Назад", callback_data=f"view:{listing_id}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 

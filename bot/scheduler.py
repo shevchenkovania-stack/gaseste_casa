@@ -25,13 +25,19 @@ async def nudge_unboosted(bot: Bot) -> int:
             await db.mark_nudged(row["id"])
             continue
         rooms = f"{row['rooms']}-комн. " if row["rooms"] else ""
+        if config.BOOST_MDL:
+            price = (f"\U0001F680 <b>Boost</b> \u2014 {config.BOOST_MDL} MDL переводом на карту "
+                     f"(или {config.BOOST_STARS} Stars \u2B50): объявление поднимается на первое "
+                     f"место в поиске на <b>{config.BOOST_DAYS} дней</b>.")
+        else:
+            price = (f"\U0001F680 <b>Boost</b> \u2014 {config.BOOST_STARS} Stars \u2B50: объявление "
+                     f"поднимается на первое место в поиске на <b>{config.BOOST_DAYS} дней</b>.")
         text = (
             f"\u23F3 Твоё объявление <b>#{row['id']}</b> "
             f"({rooms}{row['district'] or '—'} \u00B7 {row['price']} {row['currency']}) "
             "в базе, но сейчас не в топе.\n"
             f"Просмотров: <b>{row['views']}</b>\n\n"
-            f"\U0001F680 <b>Boost</b> \u2014 {config.BOOST_STARS} Stars \u2B50: объявление поднимается "
-            f"на первое место в поиске на <b>{config.BOOST_DAYS} дней</b>."
+            + price
         )
         try:
             await bot.send_message(
