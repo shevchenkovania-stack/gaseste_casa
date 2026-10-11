@@ -99,7 +99,10 @@ deploy/                  всё, что связано с сервером и п
   не было видно тестового), test_share.py (прогон реферальной петли «поделиться» на реальном .env,
   без денег и без записей → `✅ SHARE LOOP OK`), test_money_path.py, make_demo.py, post_promo.py, audit.py, whoami.sh,
   seed.py, mk_tmp_listing.py, setup_channel.py, set_avatar*, make_avatar.py, test_render.py,
-  test_publish.py, test_webapp.sh, apply_webapp.sh, fix_test.sh
+  test_publish.py (E2E «подача→модерация→канал→webapp», сам себя убирает → `✅ BOARD PIPELINE OK`),
+  make_logo.py + logo.png (бренд: дом с замочной скважиной; перерисовать = `python deploy/make_logo.py`),
+  set_logo.py (поставить logo.png на бота И на канал; setMyProfilePhoto понимает фото только через
+  attach://), test_webapp.sh, apply_webapp.sh, fix_test.sh
 MISSION.md / STATUS.md / GROWTH.md / RUNBOOK.md / TODO.md (бэклог: что реализуем потом)
 .gitattributes           LF для .sh/.py/.service/.html (иначе Windows CRLF ломает bash на сервере) и
                         binary для .db/.png — `sed -i 's/\r$//'` остаётся страховкой, а не необходимостью

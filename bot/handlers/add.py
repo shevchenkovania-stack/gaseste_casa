@@ -1,4 +1,5 @@
 import html
+import re
 
 from aiogram import Bot, F, Router
 from aiogram.fsm.context import FSMContext
@@ -72,11 +73,19 @@ async def s_district(cb: CallbackQuery, state: FSMContext) -> None:
     await cb.message.answer("Шаг 5/8. Цена (числом, валюта EUR):\nнапример <code>450</code>", parse_mode="HTML")
 
 
+def _num(txt: str) -> str:
+    """Оставить только цифры и разделители: '450 eur', '450€', '450 €' -> '450'.
+    Люди вписывают валюту и символы в поле цены - не надо гонять их с начала."""
+    return re.sub(r"[^\d.,]", "", txt or "")
+
+
 @router.message(AddListing.price)
 async def s_price(message: Message, state: FSMContext) -> None:
-    txt = (message.text or "").replace(" ", "").replace(",", ".")
+    txt = _num((message.text or "").replace(" ", "")).replace(",", ".")
     try:
         price = int(float(txt))
+        if price <= 0:
+            raise ValueError
     except ValueError:
         await message.answer("Введи число, например 450")
         return
@@ -96,7 +105,7 @@ async def s_area_skip(cb: CallbackQuery, state: FSMContext) -> None:
 @router.message(AddListing.area)
 async def s_area(message: Message, state: FSMContext) -> None:
     try:
-        area = float((message.text or "").replace(",", "."))
+        area = float(_num(message.text or "").replace(",", "."))
     except ValueError:
         await message.answer("Введи число, например 55")
         return
@@ -189,6 +198,31 @@ async def s_photos_skip(cb: CallbackQuery, state: FSMContext) -> None:
 async def s_photos_done(cb: CallbackQuery, state: FSMContext) -> None:
     await cb.answer()
     await _show_confirm(cb.message, state)
+
+
+@router.message(AddListing.photos, F.document)
+async def s_photo_doc(message: Message) -> None:
+    # самая частая случайная дыра: фото уходит как «файл» и мастер молчит
+    await message.answer(
+        "Это пришло как <b>файл</b>, а мне нужно фото — отправь его без галочки «обычное файл» "
+        "(тогда оно встанет в карточку объекта). Или нажми «Пропустить» \u23ED.",
+        parse_mode="HTML",
+    )
+
+
+@router.message(AddListing.photos)
+async def s_photos_other(message: Message) -> None:
+    await message.answer("Отправь фото (1–10), затем «Готово». Или сразу «Пропустить» \u23ED.")
+
+
+@router.message(AddListing.deal)
+@router.message(AddListing.ptype)
+@router.message(AddListing.rooms)
+@router.message(AddListing.district)
+@router.message(AddListing.confirm)
+async def s_need_button(message: Message) -> None:
+    # иначе любой текст посреди мастера проваливается в support-fallback и улетает админам
+    await message.answer("Выбери вариант кнопкой \U0001F446 Отменить мастер — кнопка «⬅️ Отмена».")
 
 
 def _summary(data: dict) -> str:

@@ -46,9 +46,9 @@ def contact_kb(row, owner) -> InlineKeyboardMarkup | None:
     return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
 
 
-async def to_channel(bot: Bot, row) -> None:
+async def to_channel(bot: Bot, row) -> list[int]:
     if not config.CHANNEL_ID:
-        return
+        return []
     photos = db.listing_photos(row)[:MAX_PHOTOS]
     caption = render.listing_caption(row)
     if row["phone"]:
@@ -68,8 +68,9 @@ async def to_channel(bot: Bot, row) -> None:
         msg = await bot.send_message(config.CHANNEL_ID, caption, parse_mode="HTML", reply_markup=kb)
         ids = [msg.message_id]
     await db.log_event("channel_post", listing_id=row["id"], meta=",".join(map(str, ids)))
+    return ids
 
 
-async def publish_listing(bot: Bot, row) -> None:
+async def publish_listing(bot: Bot, row) -> list[int]:
     await download_photos(bot, row)
-    await to_channel(bot, row)
+    return await to_channel(bot, row)

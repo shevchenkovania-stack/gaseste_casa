@@ -41,7 +41,13 @@ scp -o BatchMode=yes $Local ($target + ":" + $RemoteDir + "/" + $name) 2>&1 | Ou
 # (otherwise every remote warning renders as a red NativeCommandError block on top of the real output).
 # The merge must wrap the WHOLE command list in { ...; } 2>&1 - a trailing 2>&1 would only apply to
 # the last command and the earlier stderr would still come back as error records.
-$cmd = "{ sed -i 's/\r$//' " + $RemoteDir + "/" + $name + "; " + $RemoteCmd + "; } 2>&1"
+# Image files are binary: sed 's/\r$//' would silently corrupt them, so only text gets the CRLF strip.
+$ext = [IO.Path]::GetExtension($name).ToLower()
+if ($ext -eq ".png" -or $ext -eq ".jpg" -or $ext -eq ".jpeg") {
+    $cmd = "{ " + $RemoteCmd + "; } 2>&1"
+} else {
+    $cmd = "{ sed -i 's/\r$//' " + $RemoteDir + "/" + $name + "; " + $RemoteCmd + "; } 2>&1"
+}
 ssh -o BatchMode=yes $target $cmd | Out-File -FilePath $out -Encoding utf8
 $code = $LASTEXITCODE
 

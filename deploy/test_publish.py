@@ -1,40 +1,87 @@
-"""E2E publish test with self-made dummy listing. Creates listing -> runs the real
-production code path (publish.publish_listing). Cleanup: delete DB row by printed id +
-delete the channel post manually (owner can).
-Run on server: cd /opt/imobiliare/bot && /opt/imobiliare/venv/bin/python /tmp/test_publish.py
+"""E2E of the simple mechanism: listing -> moderation -> channel post -> Mini App API.
+
+Runs the REAL production code path (publish.publish_listing, the same call admin.py makes
+on approve), verifies the post appeared in the channel and the object appears in the webapp
+API, then deletes everything: channel messages, DB rows, events. Zero residue - safe to run
+on prod at any time. Money paths are not touched.
+
+Run on prod: cd /opt/imobiliare/bot && /opt/imobiliare/venv/bin/python test_publish.py
 """
 import asyncio
+import os
 import re
 import sys
 
 sys.path.insert(0, "/opt/imobiliare/bot")
 
-txt = open("/opt/imobiliare/bot/.env").read()
-token = re.search(r"^BOT_TOKEN=(\S+)", txt, re.M).group(1)
-
+import aiohttp
 from aiogram import Bot
 
+import config
 import db
 import publish
+
+MARKER = "ТЕХНИЧЕСКИЙ ТЕСТ конвейера (не объявление). Самоудалимся."
+
+
+def token() -> str:
+    return re.search(r"^BOT_TOKEN=(\S+)", open("/opt/imobiliare/bot/.env").read(), re.M).group(1)
+
+
+async def counts() -> tuple:
+    c = await db._db().execute("SELECT (SELECT COUNT(*) FROM listings), (SELECT COUNT(*) FROM events)")
+    return await c.fetchone()
 
 
 async def main() -> None:
     await db.init_db()
-    bot = Bot(token=token)
+    bot = Bot(token=token())
+    before = await counts()
 
+    # 1. user submitted -> admin approved (same DB states as admin.moderate produces)
     listing_id = await db.create_listing(
         user_id=1, deal="rent", ptype="apartment", rooms=2, price=580, currency="EUR",
-        district="Центр", area=55.0, floor=4, floors=9, phone="+37179999999",
-        description="ТЕХНИЧЕСКИЙ ТЕСТ автопостинга (не реальное объявление). Будет удалён.",
-        photos=[],
+        district="Центр", area=55.0, floor=4, floors=9, phone="+37379999999",
+        description=MARKER, photos=[],
     )
     await db.set_listing_status(listing_id, "active")
-    row = await db.get_listing(listing_id)
     await db.log_event("moderation_approve", listing_id=listing_id)
-    await publish.publish_listing(bot, row)
-    print("TEST_LISTING_ID", listing_id)
+
+    # 2. the real publish path
+    row = await db.get_listing(listing_id)
+    post_ids = await publish.publish_listing(bot, row)
+    assert post_ids, "channel post not created - CHANNEL_ID wrong or bot not in channel"
+    print("channel post ids:", post_ids)
+
+    # 3. Mini App must serve it
+    timeout = aiohttp.ClientTimeout(total=25)
+    async with aiohttp.ClientSession(timeout=timeout) as sess:
+        async with sess.get(f"{config.WEBAPP_URL.rstrip('/')}/api/listings") as resp:
+            data = await resp.json()
+        ids = [it["id"] for it in data["items"]]
+        assert listing_id in ids, f"listing {listing_id} missing from webapp API: {ids}"
+    print("webapp /api/listings: served")
+
+    # 4. cleanup: posts, rows, events - board must be exactly as before
+    for mid in post_ids:
+        try:
+            await bot.delete_message(config.CHANNEL_ID, mid)
+        except Exception as e:
+            print("WARN delete post:", mid, e)
+    conn = db._db()
+    await conn.execute("DELETE FROM listings WHERE id=?", (listing_id,))
+    await conn.execute("DELETE FROM events WHERE listing_id=?", (listing_id,))
+    await conn.commit()
+    after = await counts()
+    assert tuple(after) == tuple(before), f"residue: before={before} after={after}"
+
     await db.close_db()
     await bot.session.close()
+    print("✅ BOARD PIPELINE OK (create -> moderate -> channel -> webapp -> zero residue)")
+    sys.stdout.flush()
+    # session.close() can hang the loop after everything important is already done:
+    # the proof is printed and the board is verified clean - hard exit, no zombie.
+    os._exit(0)
 
 
 asyncio.run(main())
