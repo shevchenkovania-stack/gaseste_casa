@@ -6,6 +6,7 @@ from aiogram.types import CallbackQuery, Message
 import config
 import db
 import keyboards
+import render
 from handlers import add as add_h
 from handlers import boost as boost_h
 
@@ -28,12 +29,27 @@ async def show_menu(target: Message, first_name: str | None = None) -> None:
 
 @router.message(CommandStart(deep_link=True))
 async def cmd_start_deep(message: Message) -> None:
-    """t.me/gaseste_casa_bot?start=<payload> - remember where the user came from."""
+    """t.me/gaseste_casa_bot?start=<payload> - remember where the user came from.
+
+    A `share_<id>` payload means the user arrived from a forwarded listing card: land them straight
+    on that object (with its contact/share buttons), then the menu. This is the receiving end of the
+    referral loop - every shared card is an advert that opens the product one tap before 'разместить своё'.
+    """
     payload = (message.text or "").partition(" ")[2]
     u = await db.get_or_create_user(
         message.from_user.id, message.from_user.username, message.from_user.first_name
     )
     await db.log_event("start", user_id=u["id"], meta=payload[:64])
+    if payload.startswith("share_"):
+        try:
+            listing_id = int(payload.split("share_", 1)[1])
+        except ValueError:
+            listing_id = None
+        if listing_id:
+            row = await db.get_listing(listing_id)
+            if row and row["status"] == "active":
+                await db.inc_views(listing_id)
+                await render.send_listing(message.bot, message.chat.id, row, owner=False)
     await show_menu(message, message.from_user.first_name)
 
 

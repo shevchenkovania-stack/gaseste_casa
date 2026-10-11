@@ -6,6 +6,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, InputMedia
 
 import config
 import db
+import keyboards
 import render
 
 MAX_PHOTOS = 10
@@ -36,6 +37,10 @@ def contact_kb(row, owner) -> InlineKeyboardMarkup | None:
     browse_url = config.WEBAPP_URL or config.CHANNEL_URL
     if browse_url:
         rows.append([InlineKeyboardButton(text="\U0001F50D Смотреть все объекты", url=browse_url)])
+    # every channel post is a shareable advert: forwarding brings new viewers AND new owners
+    share = keyboards.share_url(row["id"])
+    if share:
+        rows.append([InlineKeyboardButton(text="\U0001F4E4 Поделиться", url=share)])
     if config.BOT_URL:
         rows.append([InlineKeyboardButton(text="\u2795 Разместить своё объявление", url=config.BOT_URL)])
     return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None

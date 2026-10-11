@@ -1,4 +1,5 @@
 import html
+from urllib.parse import quote
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 
@@ -24,6 +25,9 @@ def main_menu() -> InlineKeyboardMarkup:
         kb.insert(1, [InlineKeyboardButton(text="\U0001F5FA\uFE0F Открыть приложение", web_app=WebAppInfo(url=config.WEBAPP_URL))])
     if config.CHANNEL_URL:
         kb.append([InlineKeyboardButton(text="\U0001F4E3 Канал с объектами", url=config.CHANNEL_URL)])
+    share = share_url()
+    if share:
+        kb.append([InlineKeyboardButton(text="\U0001F4E4 Позвать на Găsește Casa", url=share)])
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
@@ -75,11 +79,34 @@ def skip_kb(prefix: str) -> InlineKeyboardMarkup:
     ])
 
 
+def share_url(listing_id: int | None = None) -> str | None:
+    """A native Telegram forward link - the engine that makes promotion run without hands.
+
+    A URL button opens the user's own share sheet with a message pre-typed; they pick chats in one
+    tap. Every shared card carries a bot deep link (`?start=share_<id>`), so whoever taps it lands on
+    that exact object and is a whisker from posting their own. Attribution stays in
+    `events.start.meta`, so we can see which listing actually spreads.
+    """
+    if not config.BOT_URL:
+        return None
+    target = f"{config.BOT_URL}?start=share_{listing_id}" if listing_id else config.BOT_URL
+    if listing_id:
+        text = (f"Объект #{listing_id} на Găsește Casa — квартиры и дома в Кишинёве от владельцев, "
+                "размещение бесплатное")
+    else:
+        text = ("Găsește Casa — бесплатная доска аренды и продажи жилья в Кишинёве прямо в Telegram: "
+                "объявление публикуется за 2 минуты")
+    return "https://t.me/share/url?url=" + quote(target, safe="") + "&text=" + quote(text)
+
+
 def listing_kb(listing_id: int, owner: bool, boosted: bool) -> InlineKeyboardMarkup:
     rows = []
     if owner:
         rows.append([InlineKeyboardButton(text="\U0001F680 Поднять (Boost)", callback_data=f"boost:{listing_id}")])
     rows.append([InlineKeyboardButton(text="\U0001F4DE Показать контакт", callback_data=f"contact:{listing_id}")])
+    share = share_url(listing_id)
+    if share:
+        rows.append([InlineKeyboardButton(text="\U0001F4E4 Поделиться объектом", url=share)])
     rows.append([InlineKeyboardButton(text="\u2b05\uFE0F К списку", callback_data="back:search")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 

@@ -52,7 +52,8 @@ bot/                     код бота и Mini App (один venv, один р
   requirements.txt       aiogram, aiosqlite, aiohttp, python-dotenv
   .env.example           шаблон ENV-файла (реальный .env в git не попадает)
   handlers/
-    start.py             /start, /menu, deep links (?start=метка, /startapp boost:<id>), /paysupport
+    start.py             /start, /menu, справка, deep links (?start=метка, ?start=share_<id> —
+                         приземление на расшаренное объявление, /startapp boost:<id>), /paysupport
     add.py               FSM подачи объявления (11 состояний) + уведомление админов
     browse.py            FSM поиска (deal → ptype → district → результаты с пагинацией)
     profile.py           «Мои объявления»
@@ -95,7 +96,8 @@ deploy/                  всё, что связано с сервером и п
                         закрыть человеку доступ к его же серверу
   apply_nudge.sh, apply_manual.sh, verify_nudge.sh, verify_manual.sh, status.sh,
   cleanup_test.sh, clean_board.sh (снять ДЕМО-карточку и всё, что на неё ссылается, — чтобы наружу
-  не было видно тестового), test_money_path.py, make_demo.py, post_promo.py, audit.py, whoami.sh,
+  не было видно тестового), test_share.py (прогон реферальной петли «поделиться» на реальном .env,
+  без денег и без записей → `✅ SHARE LOOP OK`), test_money_path.py, make_demo.py, post_promo.py, audit.py, whoami.sh,
   seed.py, mk_tmp_listing.py, setup_channel.py, set_avatar*, make_avatar.py, test_render.py,
   test_publish.py, test_webapp.sh, apply_webapp.sh, fix_test.sh
 MISSION.md / STATUS.md / GROWTH.md / RUNBOOK.md / TODO.md (бэклог: что реализуем потом)
