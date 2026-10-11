@@ -1,11 +1,16 @@
-"""Periodic jobs. Two matter for revenue: the Boost nudge and the card payment inbox,
-plus a watchdog that notices when the inbox stops receiving deliveries.
+"""Periodic jobs. Everything that can silently lose money runs here.
 
 The inbox job is what makes card money real: Lemon Squeezy posts the order to the Mini App
 process, that process only stores it, and here (single writer) it becomes a boost + payment row.
+`apply_refunds` is the same money going back - a refund that leaves the revenue line and the top of
+the board is the difference between a bookkeeper and a person who finds out from a chargeback.
+`check_manual_claims` re-pushes unpaid MIA claims to the admins (a missed confirmation looks exactly
+like a customer who never paid), `notify_expired_boosts` sells the same Boost a second time, and
+`check_webhook_silence` notices when the tunnel moved and the till went quiet.
 Deterministic by design - plain SQL, plain arithmetic, no LLM, no heuristics.
 """
 import asyncio
+import html
 import logging
 import time
 
@@ -20,6 +25,10 @@ CARD_TICK_SECONDS = 60  # how often the card payment inbox is checked
 SILENCE_MINUTES = 15    # a paid checkout reaches us in seconds; longer silence = broken webhook
 SILENCE_ALERT_COOLDOWN = 1800  # do not DM the same warning every minute
 _silence_alert_at = 0.0
+# A buyer who says "I sent the MIA transfer" is waiting for money we can already see in the bank.
+# If no admin has ticked it within this window, the claim is reminded - a missed confirmation is a
+# lost sale that looks exactly like a customer who never paid.
+MANUAL_REMIND_HOURS = 6  # a claim is reminded at most once per this window (dedup lives in events)
 
 
 async def nudge_unboosted(bot: Bot) -> int:
@@ -71,7 +80,8 @@ async def apply_card_orders(bot: Bot) -> int:
         is_test = bool(row["test_mode"])
         amount = row["amount_cents"] / 100
         await db.boost_listing(row["listing_id"], config.BOOST_DAYS)
-        await db.log_boost(row["listing_id"], buyer["id"], 0, config.BOOST_DAYS, status="paid")
+        await db.log_boost(row["listing_id"], buyer["id"], 0, config.BOOST_DAYS, status="paid",
+                           order_ref=f"ls:{row['order_id']}")
         await db.log_payment(user_id=buyer["id"], listing_id=row["listing_id"],
                              purpose="boost_card_test" if is_test else "boost_card",
                              stars=0, currency=row["currency"], telegram_charge_id=None,
@@ -101,6 +111,58 @@ async def apply_card_orders(bot: Bot) -> int:
                 pass
         applied += 1
     return applied
+
+
+async def apply_refunds(bot: Bot) -> int:
+    """Money the provider took back has to leave both the revenue line and the top of the board.
+
+    Idempotent by `payments.refunded_at`, so a repeated order_refunded delivery can never strip the
+    same boost twice. `partial_refund` is deliberately ignored: the money we keep is real, so the
+    boost stays. A refund only takes the top spot away when nothing newer paid for it.
+    """
+    done = 0
+    for row in await db.payments_refunds():
+        await db.mark_payment_refunded(row["payment_id"])
+        boost = await db.find_boost_by_ref(f"ls:{row['order_id']}")
+        took_top = False
+        if boost:
+            latest = await db.latest_boost_for_listing(row["listing_id"])
+            if latest and latest["id"] == boost["id"]:
+                await db.unboost_listing(row["listing_id"])
+                took_top = True
+            await db.set_boost_status(boost["id"], "refunded")
+        await db.log_event("boost_refunded", user_id=row["user_id"], listing_id=row["listing_id"],
+                           meta=f"{row['order_id']} {row['amount']} {row['currency']} "
+                                f"{row['order_status']}")
+        log.warning("refund processed: order %s, listing %s, top taken: %s",
+                    row["order_id"], row["listing_id"], took_top)
+        owner = await db.get_user_by_id(row["user_id"])
+        if owner:
+            try:
+                await bot.send_message(
+                    owner["tg_id"],
+                    f"\U0001F4B8 Провайдер сообщил о возврате по объявлению <b>#{row['listing_id']}</b> "
+                    f"({row['amount']:.2f} {row['currency']})."
+                    + (" Топ отключён." if took_top else "")
+                    + " Если это ошибка — напиши /paysupport.",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
+        for admin in config.ADMIN_IDS:
+            try:
+                await bot.send_message(
+                    admin,
+                    f"\u26a0\ufe0f <b>Возврат / чарджбек</b>\nЗаказ <code>{row['order_id']}</code>: "
+                    f"{row['amount']:.2f} {row['currency']}, статус {row['order_status']}\n"
+                    f"Объявление #{row['listing_id']}, "
+                    + ("топ снят" if took_top else "топ не тронут (был позже оплачен снова)"),
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
+        done += 1
+    return done
 
 
 def is_webhook_silent(link_ago_seconds: int | None, deliveries: int,
@@ -155,6 +217,72 @@ async def check_webhook_silence(bot: Bot) -> bool:
     return True
 
 
+async def check_manual_claims(bot: Bot) -> int:
+    """Re-send MIA claims that nobody has confirmed yet.
+
+    The money is already in the bank - only the tick is missing. Without this, a busy admin and a
+    silent inbox look exactly like a customer who never paid, and the sale is lost with no trace.
+    """
+    if not config.BOOST_MDL:
+        return 0
+    sent = 0
+    for row in await db.manual_claims_waiting(MANUAL_REMIND_HOURS):
+        if await db.event_recent("manual_remind", str(row["boost_id"]), MANUAL_REMIND_HOURS):
+            continue
+        expect = (f"с номера <code>{html.escape(row['listing_phone'])}</code>"
+                  if row["listing_phone"] else f"от @{row['username'] or row['tg_id']}")
+        text = (
+            f"\U0001F4E2 <b>Перевод ждёт подтверждения уже {row['waited_hours']} ч</b>\n"
+            f"Boost #{row['listing_id']}: <b>{config.BOOST_MDL} MDL</b> "
+            f"({keyboards.transfer_word()}), {config.BOOST_DAYS} дней\n"
+            f"Объявление: #{row['listing_id']}, {row['district'] or '—'}, "
+            f"{row['price']} {row['currency']}\n"
+            f"Платёж жди: {expect}\n"
+            f"Комментарий к платежу: <b>{keyboards.manual_reference(row['listing_id'])}</b>\n"
+            f"boost_id={row['boost_id']}\n\n"
+            "Если денег нет - отклони заявку, покупатель получит сообщение и попробует снова."
+        )
+        for admin in config.ADMIN_IDS:
+            try:
+                await bot.send_message(
+                    admin, text, parse_mode="HTML",
+                    reply_markup=keyboards.manual_review_kb(row["boost_id"], row["listing_id"]),
+                )
+            except Exception:
+                pass
+        await db.log_event("manual_remind", user_id=row["user_id"], listing_id=row["listing_id"],
+                           meta=str(row["boost_id"]))
+        sent += 1
+    return sent
+
+
+async def notify_expired_boosts(bot: Bot) -> int:
+    """Tell an owner whose Boost just ran out: the product worked, now sell it again.
+
+    Repeat purchase is the cheapest revenue in the project, and the moment of losing the top spot
+    is the only moment it feels real. Dedup is the `boost_expired` event newer than boosted_until,
+    so buying again re-arms the notice.
+    """
+    sent = 0
+    for row in await db.boosts_that_just_expired():
+        rooms = f"{row['rooms']}-комн. " if row["rooms"] else ""
+        text = (
+            f"\u23F1 Твой Boost по объявлению <b>#{row['id']}</b> "
+            f"({rooms}{row['district'] or '—'} \u00B7 {row['price']} {row['currency']}) "
+            "закончился - объявление снова в общем списке.\n\n"
+            + keyboards.boost_pitch()
+        )
+        try:
+            await bot.send_message(row["tg_id"], text, parse_mode="HTML",
+                                   reply_markup=keyboards.boost_kb(row["id"]))
+        except Exception as e:
+            log.info("expiry notice skipped for #%s: %s", row["id"], e)
+        await db.log_event("boost_expired", user_id=row["user_id"], listing_id=row["id"],
+                           meta=row["boosted_until"])
+        sent += 1
+    return sent
+
+
 async def run(bot: Bot) -> None:
     """Sleep first, then work forever. Exceptions never kill the loop."""
     elapsed = 0
@@ -165,7 +293,13 @@ async def run(bot: Bot) -> None:
             n = await apply_card_orders(bot)
             if n:
                 log.info("card boosts applied: %s", n)
+            r = await apply_refunds(bot)
+            if r:
+                log.warning("refunds processed: %s", r)
             await check_webhook_silence(bot)
+            m = await check_manual_claims(bot)
+            if m:
+                log.info("manual claim reminders: %s", m)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -176,6 +310,9 @@ async def run(bot: Bot) -> None:
                 n = await nudge_unboosted(bot)
                 if n:
                     log.info("boost nudges sent: %s", n)
+                e = await notify_expired_boosts(bot)
+                if e:
+                    log.info("boost expiry notices: %s", e)
             except asyncio.CancelledError:
                 raise
             except Exception:

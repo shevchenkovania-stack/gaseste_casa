@@ -72,7 +72,9 @@ async def manual_review(cb: CallbackQuery, bot: Bot) -> None:
     await cb.message.edit_reply_markup(reply_markup=None)
 
     if action == "manapp":
-        await db.set_boost_status(boost_id, "manual")
+        # order_ref ties the boost to the payment row that paid for it, so a later
+        # "money went back" (chargeback via the bank) can be traced to the boost to switch off.
+        await db.set_boost_status(boost_id, "manual", order_ref=f"manual:{boost_id}")
         await db.boost_listing(listing_id, boost["days"])
         # boosts.stars holds the agreed MDL price for manual claims (set at claim time)
         amount_mdl = float(boost["stars"] or config.BOOST_MDL)
@@ -121,7 +123,11 @@ async def stats(message: Message) -> None:
         f"Платежей: {s['payments']} (тестовых: {s['test_payments']})\n"
         f"REAL_REVENUE Картой 💳: <b>{s['revenue_card']:.2f}</b> (не применено карточных заказов: {s['card_unapplied']})\n"
         f"REAL_REVENUE MDL \U0001F4B0: <b>{s['revenue_mdl']}</b>\n"
-        f"REAL_REVENUE Stars \u2B50: <b>{s['revenue_stars']}</b>"
+        f"REAL_REVENUE Stars \u2B50: <b>{s['revenue_stars']}</b>\n"
+        # both lines are "money that needs a human": a refund we may have to react to,
+        # and a transfer the buyer already sent but nobody has ticked yet
+        f"Возвратов/чарджбеков: {s['refunds']}\n"
+        f"Переводов ждут подтверждения: {s['manual_waiting']}"
     )
     await message.answer(text, parse_mode="HTML")
 

@@ -50,6 +50,9 @@ CREATE TABLE IF NOT EXISTS boosts (
     stars INTEGER NOT NULL,
     days INTEGER NOT NULL,
     status TEXT DEFAULT 'pending',
+    -- what paid for this boost: 'ls:<order_id>' / 'tg:<charge_id>' / 'manual:<boost_id>'.
+    -- Without it a refund cannot be traced back to the boost it must switch off.
+    order_ref TEXT,
     created_at TEXT DEFAULT (datetime('now'))
 );
 
@@ -62,6 +65,8 @@ CREATE TABLE IF NOT EXISTS payments (
     currency TEXT,
     telegram_charge_id TEXT,
     provider_charge_id TEXT,
+    -- set once the provider told us the money went back; refunded money is not revenue
+    refunded_at TEXT,
     created_at TEXT DEFAULT (datetime('now'))
 );
 
@@ -119,6 +124,14 @@ async def _migrate() -> None:
     if "is_test" not in cols:
         # provider test-mode orders are real rows but never real revenue
         await _conn.execute("ALTER TABLE payments ADD COLUMN is_test INTEGER NOT NULL DEFAULT 0")
+    if "refunded_at" not in cols:
+        # money the provider sent back must leave REAL_REVENUE, but the audit row stays
+        await _conn.execute("ALTER TABLE payments ADD COLUMN refunded_at TEXT")
+    cur = await _conn.execute("PRAGMA table_info(boosts)")
+    cols = {r["name"] for r in await cur.fetchall()}
+    if "order_ref" not in cols:
+        # without this a refund cannot be traced back to the boost it must switch off
+        await _conn.execute("ALTER TABLE boosts ADD COLUMN order_ref TEXT")
 
 
 async def close_db() -> None:
@@ -237,6 +250,15 @@ async def boost_listing(listing_id: int, days: int) -> None:
     await db.commit()
 
 
+async def unboost_listing(listing_id: int) -> None:
+    """Take the listing out of the top: used when the money for its Boost went back to the buyer."""
+    db = _db()
+    await db.execute(
+        "UPDATE listings SET boosted_until = NULL, updated_at = datetime('now') "
+        "WHERE id = ? AND boosted_until IS NOT NULL", (listing_id,))
+    await db.commit()
+
+
 async def search_listings(
     deal: str | None = None,
     ptype: str | None = None,
@@ -333,11 +355,12 @@ async def all_user_tg_ids():
     return [r["tg_id"] for r in await cur.fetchall()]
 
 
-async def log_boost(listing_id: int, user_id: int, stars: int, days: int, status: str = "paid") -> int:
+async def log_boost(listing_id: int, user_id: int, stars: int, days: int, status: str = "paid",
+                    order_ref: str | None = None) -> int:
     db = _db()
     cur = await db.execute(
-        "INSERT INTO boosts (listing_id, user_id, stars, days, status) VALUES (?, ?, ?, ?, ?)",
-        (listing_id, user_id, stars, days, status),
+        "INSERT INTO boosts (listing_id, user_id, stars, days, status, order_ref) VALUES (?, ?, ?, ?, ?, ?)",
+        (listing_id, user_id, stars, days, status, order_ref),
     )
     await db.commit()
     return cur.lastrowid
@@ -356,9 +379,13 @@ async def find_boost(listing_id: int, status: str):
     return await cur.fetchone()
 
 
-async def set_boost_status(boost_id: int, status: str) -> None:
+async def set_boost_status(boost_id: int, status: str, order_ref: str | None = None) -> None:
     db = _db()
-    await db.execute("UPDATE boosts SET status = ? WHERE id = ?", (status, boost_id))
+    if order_ref is None:
+        await db.execute("UPDATE boosts SET status = ? WHERE id = ?", (status, boost_id))
+    else:
+        await db.execute("UPDATE boosts SET status = ?, order_ref = ? WHERE id = ?",
+                         (status, order_ref, boost_id))
     await db.commit()
 
 
@@ -415,6 +442,81 @@ async def mark_card_order_applied(row_id: int) -> None:
     await db.commit()
 
 
+async def payments_refunds(limit: int = 20):
+    """Applied card payments the provider has since taken back, still unprocessed.
+
+    Full refunds and chargebacks only: a `partial_refund` keeps the boost (the buyer still owes us
+    nothing, but the money we keep is real) and stays in revenue. `refunded_at IS NULL` is the
+    marker, so a repeated order_refunded delivery can never strip the same boost twice.
+    """
+    q = """SELECT p.id AS payment_id, p.listing_id, p.user_id, p.amount, p.currency,
+                  p.provider_charge_id, o.order_id, o.status AS order_status
+           FROM payments p
+           JOIN card_orders o ON o.order_id = p.provider_charge_id
+           WHERE p.refunded_at IS NULL AND p.provider_charge_id IS NOT NULL
+             AND o.applied = 1 AND o.status IN ('refunded', 'fraudulent')
+           ORDER BY p.id LIMIT ?"""
+    cur = await _db().execute(q, (limit,))
+    return await cur.fetchall()
+
+
+async def mark_payment_refunded(payment_id: int) -> None:
+    db = _db()
+    await db.execute("UPDATE payments SET refunded_at = datetime('now') WHERE id = ?",
+                     (payment_id,))
+    await db.commit()
+
+
+async def find_boost_by_ref(order_ref: str):
+    cur = await _db().execute(
+        "SELECT * FROM boosts WHERE order_ref = ? ORDER BY id DESC LIMIT 1", (order_ref,))
+    return await cur.fetchone()
+
+
+async def latest_boost_for_listing(listing_id: int):
+    """Newest boost of a listing: a refund only takes the top spot away if nothing newer paid for it."""
+    cur = await _db().execute(
+        "SELECT * FROM boosts WHERE listing_id = ? ORDER BY id DESC LIMIT 1", (listing_id,))
+    return await cur.fetchone()
+
+
+async def manual_claims_waiting(older_than_hours: int, limit: int = 20):
+    """MIA claims a buyer reported but nobody has confirmed yet, with everything an admin needs
+    to find the transfer in the bank statement (payer phone lives on the listing)."""
+    q = """SELECT b.id AS boost_id, b.listing_id, b.created_at,
+                  CAST((julianday('now') - julianday(b.created_at)) * 24 AS INTEGER) AS waited_hours,
+                  l.district, l.price, l.currency, l.phone AS listing_phone,
+                  u.id AS user_id, u.tg_id, u.username
+           FROM boosts b
+           JOIN listings l ON l.id = b.listing_id
+           JOIN users u ON u.id = b.user_id
+           WHERE b.status = 'manual_pending'
+             AND b.created_at < datetime('now', ?)
+           ORDER BY b.id LIMIT ?"""
+    cur = await _db().execute(q, (f"-{int(older_than_hours)} hours", limit))
+    return await cur.fetchall()
+
+
+async def boosts_that_just_expired(hours: int = 48, limit: int = 20):
+    """Active listings whose Boost window has passed and which nobody has been told about yet.
+
+    The dedup lives in `events`: a `boost_expired` row newer than `boosted_until` means this exact
+    window was already announced. Re-boosting moves boosted_until forward, so the next expiry gets
+    noticed again - no extra column, no state to clean up.
+    """
+    q = """SELECT l.id, l.user_id, l.district, l.price, l.currency, l.rooms, l.boosted_until,
+                  u.tg_id
+           FROM listings l JOIN users u ON u.id = l.user_id
+           WHERE l.status = 'active' AND l.boosted_until IS NOT NULL
+             AND l.boosted_until <= datetime('now')
+             AND l.boosted_until >= datetime('now', ?)
+             AND NOT EXISTS (SELECT 1 FROM events e WHERE e.name = 'boost_expired'
+                             AND e.listing_id = l.id AND e.created_at > l.boosted_until)
+           ORDER BY l.id LIMIT ?"""
+    cur = await _db().execute(q, (f"-{int(hours)} hours", limit))
+    return await cur.fetchall()
+
+
 async def card_checkouts_since(minutes: int) -> int:
     """Card payment pages we handed out in the window (demand side of the webhook)."""
     cur = await _db().execute(
@@ -449,6 +551,14 @@ async def log_event(name: str, user_id: int | None = None, listing_id: int | Non
     await db.commit()
 
 
+async def event_recent(name: str, meta: str | None, hours: int) -> bool:
+    """Was this exact event logged inside the window? Reminder dedup, restart-safe by design."""
+    q = ("SELECT 1 FROM events WHERE name = ? AND IFNULL(meta,'') = IFNULL(?, '') "
+         "AND created_at > datetime('now', ?) LIMIT 1")
+    cur = await _db().execute(q, (name, meta, f"-{int(hours)} hours"))
+    return await cur.fetchone() is not None
+
+
 async def stats() -> dict:
     db = _db()
     out: dict[str, Any] = {}
@@ -459,13 +569,19 @@ async def stats() -> dict:
         "pending": "SELECT COUNT(*) c FROM listings WHERE status='pending'",
         "boosts": "SELECT COUNT(*) c FROM boosts WHERE status IN ('paid','manual')",
         "payments": "SELECT COUNT(*) c FROM payments",
-        # REAL_REVENUE must stay honest: test invoices and provider test-mode orders excluded
-        "revenue_stars": "SELECT COALESCE(SUM(stars),0) c FROM payments WHERE currency='XTR' AND is_test=0",
-        "revenue_mdl": "SELECT COALESCE(SUM(amount),0) c FROM payments WHERE currency='MDL' AND is_test=0",
+        # REAL_REVENUE must stay honest: test invoices and provider test-mode orders excluded,
+        # and money the provider took back is not revenue either (refunded_at IS NULL)
+        "revenue_stars": "SELECT COALESCE(SUM(stars),0) c FROM payments "
+                         "WHERE currency='XTR' AND is_test=0 AND refunded_at IS NULL",
+        "revenue_mdl": "SELECT COALESCE(SUM(amount),0) c FROM payments "
+                       "WHERE currency='MDL' AND is_test=0 AND refunded_at IS NULL",
         # card rail is priced in the store currency (USD), keep it on its own line
         "revenue_card": "SELECT COALESCE(SUM(amount),0) c FROM payments "
-                        "WHERE currency NOT IN ('XTR','MDL','XTEST') AND is_test=0",
+                        "WHERE currency NOT IN ('XTR','MDL','XTEST') AND is_test=0 "
+                        "AND refunded_at IS NULL",
         "card_unapplied": "SELECT COUNT(*) c FROM card_orders WHERE applied = 0 AND status='paid'",
+        "refunds": "SELECT COUNT(*) c FROM payments WHERE refunded_at IS NOT NULL",
+        "manual_waiting": "SELECT COUNT(*) c FROM boosts WHERE status='manual_pending'",
         "test_payments": "SELECT COUNT(*) c FROM payments WHERE currency = 'XTEST' OR is_test = 1",
     }.items():
         cur = await db.execute(q)

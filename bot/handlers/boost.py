@@ -190,7 +190,8 @@ async def on_paid(message: Message, bot: Bot) -> None:
         listing_id = int(payload.split(":", 1)[1])
         days = config.BOOST_DAYS
         await db.boost_listing(listing_id, days)
-        await db.log_boost(listing_id, user["id"], sp.total_amount, days, status="paid")
+        await db.log_boost(listing_id, user["id"], sp.total_amount, days, status="paid",
+                           order_ref=f"tg:{sp.telegram_payment_charge_id}")
         await db.log_payment(
             user_id=user["id"], listing_id=listing_id,
             purpose="boost_test" if is_test else "boost",

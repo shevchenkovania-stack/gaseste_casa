@@ -74,7 +74,10 @@ echo "=== schema ==="
 import sqlite3
 d = sqlite3.connect('/opt/imobiliare/data/imobiliare.db')
 print('payments cols:', [r[1] for r in d.execute('PRAGMA table_info(payments)')])
+print('boosts cols:', [r[1] for r in d.execute('PRAGMA table_info(boosts)')])
 print('boost statuses:', d.execute('select status, count(*) from boosts group by status').fetchall())
+print('refunds:', d.execute('select count(*) from payments where refunded_at is not null').fetchone()[0])
+print('manual waiting:', d.execute("select count(*) from boosts where status='manual_pending'").fetchone()[0])
 PYEOF
 
 echo "=== log ==="
