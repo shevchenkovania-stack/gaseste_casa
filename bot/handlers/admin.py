@@ -84,7 +84,9 @@ async def manual_review(cb: CallbackQuery, bot: Bot) -> None:
         await db.log_event("boost_manual_paid", user_id=boost["user_id"], listing_id=listing_id,
                            meta=str(int(amount_mdl)))
         await cb.message.answer(f"✅ Boost #{listing_id} активирован на {boost['days']} дней. "
-                                f"Сумма: {int(amount_mdl)} MDL.")
+                                f"Сумма: {int(amount_mdl)} MDL.",
+                                # the tick that keeps the books honest if this money goes back by hand
+                                reply_markup=keyboards.manual_refund_kb(boost_id, listing_id))
         if owner:
             try:
                 await bot.send_message(
@@ -108,6 +110,52 @@ async def manual_review(cb: CallbackQuery, bot: Bot) -> None:
                 )
             except Exception:
                 pass
+
+
+@router.callback_query(F.data.startswith("manref:") | F.data.startswith("manrefyes:"))
+async def manual_refund(cb: CallbackQuery, bot: Bot) -> None:
+    """MIA has no revoke API: the admin transfers the money back in his banking app and books it here.
+
+    Two taps on purpose - this writes money out of the revenue line and takes a paying customer out
+    of the top of the board, so it must never fire on a stray thumb.
+    """
+    if not is_admin(cb.from_user.id):
+        await cb.answer("Нет доступа", show_alert=True)
+        return
+    action, sid = cb.data.split(":", 1)
+    boost_id = int(sid)
+    await cb.answer()
+    boost = await db.get_boost(boost_id)
+    if not boost:
+        await cb.message.answer("Заявка не найдена (возможно, уже обработана).")
+        return
+    if action == "manref":
+        if boost["status"] != "manual":
+            await cb.message.answer(
+                f"Заявка #{boost_id} в статусе «{boost['status']}» — возвращать нечего.")
+            return
+        await cb.message.answer(
+            f"\U0001F4B8 Подтверди возврат: заявка #{boost_id}, "
+            f"{boost['stars']} MDL, объявление #{boost['listing_id']}.\n\n"
+            "Нажми «Да», только если деньги уже ушли обратно покупателю. "
+            "После этого сумма перестанет считаться выручкой, а Boost снимется с топа.",
+            reply_markup=keyboards.manual_refund_confirm_kb(boost_id, boost["listing_id"]),
+        )
+        return
+    await cb.message.edit_reply_markup(reply_markup=None)
+    result = await scheduler.refund_manual_claim(bot, boost_id)
+    await cb.message.answer(result)
+    for admin in config.ADMIN_IDS:
+        if admin == cb.from_user.id:
+            continue
+        try:
+            await bot.send_message(
+                admin,
+                f"\u21a9\ufe0f Возврат по переводу: заявка #{boost_id}, "
+                f"объявление #{boost['listing_id']}.\n{result}\nОформил: @{cb.from_user.username or cb.from_user.id}",
+            )
+        except Exception:
+            pass
 
 
 @router.message(Command("stats"))

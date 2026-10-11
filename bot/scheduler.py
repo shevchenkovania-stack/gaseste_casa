@@ -165,6 +165,53 @@ async def apply_refunds(bot: Bot) -> int:
     return done
 
 
+async def refund_manual_claim(bot: Bot, boost_id: int) -> str:
+    """Book an MIA/MDL transfer that the admin sent back by hand.
+
+    MIA has no revoke API, so the only honest record is a human tick - and it has to write the same
+    three things a card refund writes, otherwise the MDL revenue line quietly keeps money we already
+    gave back: the payment gets `refunded_at` (which drops it out of every revenue total and makes a
+    second tap a no-op), the boost goes to 'refunded', and the top spot is released when nothing
+    newer paid for it.
+    """
+    boost = await db.get_boost(boost_id)
+    if not boost:
+        return "Заявка не найдена (возможно, уже обработана)."
+    if boost["status"] == "refunded":
+        return "Этот платёж уже отмечен как возвращённый — ничего не меняю."
+    if boost["status"] != "manual":
+        return (f"Возврат оформляется только по подтверждённому платежу, "
+                f"а заявка #{boost_id} в статусе «{boost['status']}».")
+    listing_id = boost["listing_id"]
+    payment = await db.find_payment_by_charge(f"manual:{boost_id}")
+    amount = float(payment["amount"]) if payment and payment["amount"] is not None \
+        else float(boost["stars"] or config.BOOST_MDL)
+    currency = (payment["currency"] if payment else None) or "MDL"
+    if payment:
+        await db.mark_payment_refunded(payment["id"])
+    took_top = False
+    latest = await db.latest_boost_for_listing(listing_id)
+    if latest and latest["id"] == boost_id:
+        await db.unboost_listing(listing_id)
+        took_top = True
+    await db.set_boost_status(boost_id, "refunded")
+    await db.log_event("manual_refunded", user_id=boost["user_id"], listing_id=listing_id,
+                       meta=f"{boost_id} {amount:.0f} {currency}")
+    log.warning("manual refund booked: boost %s, listing %s, %s %s, top taken: %s",
+                boost_id, listing_id, amount, currency, took_top)
+    owner = await db.get_user_by_id(boost["user_id"])
+    if owner:
+        note = (f"\U0001F4B8 Деньги по объявлению <b>#{listing_id}</b> ({amount:.0f} {currency}) "
+                "возвращены тебе переводом.")
+        note += " Топ отключён." if took_top else " Топ остался: позже ты оплатил Boost снова."
+        try:
+            await bot.send_message(owner["tg_id"], note, parse_mode="HTML")
+        except Exception:
+            pass
+    return (f"Готово: {amount:.0f} {currency} убраны из выручки"
+            + (", топ снят." if took_top else " (топ не тронут — позже был оплачен снова)."))
+
+
 def is_webhook_silent(link_ago_seconds: int | None, deliveries: int,
                       grace_seconds: int = SILENCE_MINUTES * 60) -> bool:
     """Pure rule, no DB: a payment link is old enough to have been paid, yet nothing arrived.

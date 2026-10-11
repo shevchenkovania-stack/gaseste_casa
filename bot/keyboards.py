@@ -210,6 +210,29 @@ def manual_review_kb(boost_id: int, listing_id: int) -> InlineKeyboardMarkup:
     ])
 
 
+def manual_refund_kb(boost_id: int, listing_id: int) -> InlineKeyboardMarkup:
+    """Offered to the admin right after a manual transfer was approved.
+
+    MIA has no revoke API: returning the money means opening the banking app and transferring it
+    back by hand. This button is where the books learn about it, so the refunded MDL stops being
+    counted as revenue and the buyer stops living in the top of the board for free.
+    """
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="\u21A9\uFE0F Деньги вернули — снять Boost",
+                              callback_data=f"manref:{boost_id}")],
+        [InlineKeyboardButton(text="\U0001F441 Объявление", callback_data=f"view:{listing_id}")],
+    ])
+
+
+def manual_refund_confirm_kb(boost_id: int, listing_id: int) -> InlineKeyboardMarkup:
+    """A money action never fires on the first tap."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="\u2705 Да, я перевёл деньги обратно",
+                              callback_data=f"manrefyes:{boost_id}"),
+         InlineKeyboardButton(text="\u2b05\uFE0F Отмена", callback_data=f"view:{listing_id}")],
+    ])
+
+
 def moderation_kb(listing_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [

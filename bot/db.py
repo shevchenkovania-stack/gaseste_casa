@@ -467,6 +467,15 @@ async def mark_payment_refunded(payment_id: int) -> None:
     await db.commit()
 
 
+async def find_payment_by_charge(telegram_charge_id: str):
+    """The payment row a manual (MIA/MDL) approval wrote, so a later hand-refund can be booked
+    against exactly that money instead of against a guess."""
+    cur = await _db().execute(
+        "SELECT * FROM payments WHERE telegram_charge_id = ? ORDER BY id DESC LIMIT 1",
+        (telegram_charge_id,))
+    return await cur.fetchone()
+
+
 async def find_boost_by_ref(order_ref: str):
     cur = await _db().execute(
         "SELECT * FROM boosts WHERE order_ref = ? ORDER BY id DESC LIMIT 1", (order_ref,))

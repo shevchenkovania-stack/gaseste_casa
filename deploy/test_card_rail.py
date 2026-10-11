@@ -8,7 +8,8 @@ Dedupe is checked too: a repeated webhook must not pay twice. The webhook watchd
 pure logic plus one "healthy rail stays silent" pass, so no admin receives a test DM.
 Then the money that comes back is tested as well: a refund switches the boost off and leaves
 REAL_REVENUE, a partial refund changes nothing, an unconfirmed MIA claim is reminded once per
-window, and an expired Boost produces exactly one repeat-sale offer.
+window, an expired Boost produces exactly one repeat-sale offer, and a MIA transfer the admin
+sent back by hand leaves the MDL revenue line and the top of the board.
 Everything is deleted afterwards.
 
 Run: cd /opt/imobiliare/bot && /opt/imobiliare/venv/bin/python /tmp/test_card_rail.py
@@ -197,11 +198,48 @@ async def main() -> None:
         assert await reminders() == first, "reminder must be deduped inside the window"
         print(f"MIA claim: reminded once in {scheduler.MANUAL_REMIND_HOURS}h, admin got the review buttons")
 
+        # --- MIA money returned by hand: the MDL revenue line has to follow it out ---
+        # approve the claim exactly the way the admin button does (manapp), then refund it
+        mdl_baseline = float((await db.stats())["revenue_mdl"])  # robust against real MDL revenue
+        await db.set_boost_status(mid, "manual", order_ref=f"manual:{mid}")
+        await db.boost_listing(listing_id, config.BOOST_DAYS)
+        await db.log_payment(user_id=owner["id"], listing_id=listing_id, purpose="boost_manual",
+                             stars=0, currency="MDL", telegram_charge_id=f"manual:{mid}",
+                             provider_charge_id=None, amount=float(config.BOOST_MDL))
+        s = await db.stats()
+        mdl_before = float(s["revenue_mdl"])
+        assert s["manual_waiting"] == 0, "an approved claim is no longer waiting"
+        assert abs(mdl_before - (mdl_baseline + config.BOOST_MDL)) < 1e-9, f"MDL revenue: {s}"
+        text = await scheduler.refund_manual_claim(bot, mid)
+        assert "убраны из выручки" in text, text
+        cur = await conn.execute("SELECT status, order_ref FROM boosts WHERE id = ?", (mid,))
+        b = await cur.fetchone()
+        assert b["status"] == "refunded" and b["order_ref"] == f"manual:{mid}"
+        cur = await conn.execute("SELECT refunded_at FROM payments WHERE telegram_charge_id = ?",
+                                 (f"manual:{mid}",))
+        assert (await cur.fetchone())["refunded_at"], "the MDL row must stop being revenue"
+        assert (await db.get_listing(listing_id))["boosted_until"] is None, "and the top must go"
+        s = await db.stats()
+        assert float(s["revenue_mdl"]) == mdl_before - config.BOOST_MDL, s
+        text2 = await scheduler.refund_manual_claim(bot, mid)
+        assert "уже отмечен" in text2, text2
+        assert float((await db.stats())["revenue_mdl"]) == float(mdl_before) - config.BOOST_MDL, \
+            "a second tap must not strip the same money twice"
+        print(f"MIA refund: {text}")
+
+        # a claim nobody confirmed cannot be "refunded" - there is no money to give back
+        mid2 = await db.log_boost(listing_id, owner["id"], config.BOOST_MDL, config.BOOST_DAYS,
+                                  status="manual_pending")
+        text3 = await scheduler.refund_manual_claim(bot, mid2)
+        assert "статусе" in text3, text3
+        assert (await db.get_boost(mid2))["status"] == "manual_pending"
+        print("MIA refund guard: an unconfirmed claim is refused, not silently zeroed")
+
         print("✅ MONEY RAIL OK - paid, refunded, reminded and re-sold, all by itself")
     finally:
         await conn.execute("DELETE FROM events WHERE listing_id = ?", (listing_id,))
         await conn.execute("DELETE FROM boosts WHERE listing_id = ?", (listing_id,))
-        await conn.execute("DELETE FROM payments WHERE provider_charge_id = ?", (ORDER_ID,))
+        await conn.execute("DELETE FROM payments WHERE listing_id = ?", (listing_id,))
         await conn.execute("DELETE FROM card_orders WHERE order_id = ?", (ORDER_ID,))
         await conn.execute("DELETE FROM listings WHERE id = ?", (listing_id,))
         await conn.commit()

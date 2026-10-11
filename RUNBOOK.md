@@ -268,6 +268,8 @@ CREATE INDEX idx_listings_district ON listings(district);
 - возвраты: `payments_refunds()` (оплаченные и уже применённые заказы, у которых `card_orders.status`
   стал `refunded`/`fraudulent`, а `payments.refunded_at` ещё пуст), `mark_payment_refunded(id)`,
   `find_boost_by_ref('ls:<order_id>')`, `latest_boost_for_listing(id)`, `unboost_listing(id)`;
+  `find_payment_by_charge('manual:<boost_id>')` — та же честность для возврата MIA-перевода, где
+  `card_orders` нет и платёж ищется по `payments.telegram_charge_id`;
   `partial_refund` в выборку **не входит** — частично возвращенные деньги остаются выручкой и Boost
   остаётся (статусы заказа LS проверены по API-докам: `pending | failed | paid | refunded |
   partial_refund | fraudulent`);
@@ -312,6 +314,7 @@ d.execute('select sum(amount) from payments where currency=\"MDL\"').fetchone())
 | `manualpaid:` | boost.py | listing_id | заявка «я перевёл» → `boosts.status='manual_pending'` + уведомления админам |
 | `mod:approve:` `mod:reject:` | admin.py | listing_id | модерация |
 | `manapp:` `manrej:` | admin.py | boost_id | подтвердить / отклонить ручной платёж |
+| `manref:` `manrefyes:` | admin.py | boost_id | подтвердить возврат MIA-перевода (два тапа: спросить → снять деньги с выручки и с топа) |
 | `back:search` | browse.py | — | вернуться к результатам |
 
 Состояния FSM: `AddListing = deal, ptype, rooms, district, price, area, floor, description, phone, photos, confirm`
@@ -452,12 +455,25 @@ boost_kb → manual:<id> → keyboards.manual_pitch(id): шаги MIA + тап-�
         → manapp → boosts.status='manual', boosts.order_ref='manual:<boost_id>', boost_listing(days),
                    payments(purpose='boost_manual', currency='MDL', amount=BOOST_MDL,
                             telegram_charge_id='manual:<boost_id>'),
-                   events.boost_manual_paid, владельцу «платёж получен, топ на N дней»
+                   events.boost_manual_paid, владельцу «платёж получен, топ на N дней»,
+                   админу тем же сообщением кнопка manref:<boost_id> («деньги вернули — снять Boost»)
         → manrej  → boosts.status='manual_rejected', владельцу «не нашли деньги, попробуй ещё раз»
+        → manref  → админу подтверждение (MDL, объявление, «нажимай Да, только если деньги уже ушли»)
+        → manrefyes → scheduler.refund_manual_claim(): payments.refunded_at, boosts.status='refunded',
+                      unboost (только если этот Boost последний), events.manual_refunded,
+                      владельцу «деньги возвращены», остальным админам «оформил: @username»
 scheduler.check_manual_claims (бот-процесс, каждые 60 с):
   manual_pending старше MANUAL_REMIND_HOURS → то же сообщение админам ещё раз,
   не чаще одного раза на окно (дедуп = events.name='manual_remind', meta=boost_id)
 ```
+
+**Возврат перевода (закрыто 11.10).** У MIA нет API отзыва: вернуть деньги можно только своим
+переводом в банковском приложении. Чтобы эта ручная операция оставляла корректную бухгалтерию, `admin.py`
+предлагает админу вторую кнопку (`manref` → `manrefyes`), а `scheduler.refund_manual_claim()` делает ровно
+те же три записи, что и карточный возврат: MDL перестают считаться выручкой (`payments.refunded_at`),
+Boost гаснет, топ освобождается, если позже клиент ничего не оплатил. Функция идемпотентна (повторный тап
+отвечает «уже отмечен») и отказывается работать по неоплаченной заявке. Проверено тестом
+(`test_card_rail.py` → блок `MIA refund`).
 
 Весь текст платёжной инструкции собирается в одном месте — `keyboards.manual_pitch()` (плюс
 `pay_lines()` / `pay_block()` / `manual_reference()`), поэтому он проверяется как чистая функция
@@ -572,6 +588,12 @@ payload='boost:<id>')` → `pre_checkout_query` (всегда `ok=True`) → `me
 и «клиент, который не заплатил» выглядят одинаково. Дедуп — `events` (`name='manual_remind'`,
 `meta=<boost_id>`), поэтому напоминание живёт ровно одно на окно и не заводится заново после рестарта.
 Если `BOOST_MDL` пуст (рельс выключен), задача молчит.
+
+`refund_manual_claim(bot, boost_id)` — не задача по расписанию, а функция, которую вызывает админская
+кнопка `manrefyes:` (handler писать деньги не должен, и весь возврат живёт в одном модуле). Делает то же,
+что `apply_refunds` для карты, но по `payments.telegram_charge_id = 'manual:<boost_id>'`, и потому что
+у MIA нет API отзыва — по слову человека. Идемпотентна по `refunded_at`, отказывается по заявке, которая
+ещё не подтверждена.
 
 `check_webhook_silence(bot)` — сторож кассы, нужен из-за временного публичного адреса (туннель):
 ссылка на оплату выдана **больше `SILENCE_MINUTES=15` мин назад**, а за это окно в `card_orders`
@@ -825,17 +847,22 @@ PowerShell ломает кавычки и `[`. Всегда: файл `.sh`/`.py
 - **`deploy/test_card_rail.py`** — **тест кассы без аккаунта LS и без денег** (название историческое,
   сейчас он покрывает весь денежный путь): создаёт тестовое объявление, подделывает
   `order_created` с честной HMAC-подписью, гонит его через
-  `verify_signature` → `parse_order_event` → `store_card_order` (тупик дубля тоже проверяется) →
+  `verify_signature` → `parse_order_event` → `store_card_order` (повтор заказа = no-op) →
   `scheduler.apply_card_orders` и утверждает `boosted_until`, строку `payments` (5.0 USD,
   `boost_card`, `is_test=0`), `boosts.status='paid'` + `order_ref='ls:<order_id>'`,
   `stats().revenue_card` и `card_unapplied=0`; потом **обратную сторону денег**: `status='refunded'` →
   `apply_refunds` снимает топ, ставит `boosts.status='refunded'`, `payments.refunded_at` и возвращает
   `revenue_card` к прежнему значению, повторная доставка возврата = no-op, `partial_refund` не трогает
   ничего; затем `notify_expired_boosts` (ровно одно предложение на окно истекания) и
-  `check_manual_claims` (напоминание об неподтверждённом MIA-переводе не чаще одного раза за
-  `MANUAL_REMIND_HOURS`); плюс сторож (`is_webhook_silent` на четырёх наборах входных данных и один
+  `check_manual_claims` (напоминание о неподтверждённом MIA-переводе не чаще одного раза за
+  `MANUAL_REMIND_HOURS`); затем **обратная сторона рельса 2**: `refund_manual_claim` по подтверждённому
+  переводу — `revenue_mdl` уменьшается на `BOOST_MDL`, `boosts.status='refunded'`, топ снят, повторный
+  тап отвечает «уже отмечен» и ничего не меняет, а по неоплаченной заявке функция отказывается что-либо
+  делать; плюс сторож (`is_webhook_silent` на четырёх наборах входных данных и один
   проход `check_webhook_silence`, который на здоровом рельсе должен вернуть `False`, то есть писать
   админам не должен). После всего тест удаляет свои строки. Успех = `✅ MONEY RAIL OK`;
+  **важно:** возвраты и напоминания шлют настоящие ЛС админу — это часть проверяемой цепочки, так что
+  прогон теста на проде означает несколько сообщений тебе в Telegram;
 - `deploy/make_demo.py` — удаляет старые ДЕМО-карточки, создаёт активную «ДЕМО» карточку на админе
   и шлёт админу настоящий Boost-оффер (все включённые кнопки). Не публикуется в канал;
 - `deploy/post_promo.py [message_id]` — пост-визитка в канал + пин; с аргументом **редактирует**
@@ -927,6 +954,7 @@ d=sqlite3.connect('/opt/imobiliare/data/backup.db');s.backup(d);print('ok')"   #
 | `/admin` | список команд |
 | `/paysupport` | контакт по возвратам (для всех) |
 | кнопки `manapp:`/`manrej:` | подтвердить/отклонить ручной MDL-платёж |
+| кнопка `manref:` → `manrefyes:` | «деньги вернули переводом»: MDL уходят из выручки, Boost гаснет (§8 «Рельс 2») |
 
 ---
 
@@ -999,7 +1027,11 @@ d=sqlite3.connect('/opt/imobiliare/data/backup.db');s.backup(d);print('ok')"   #
   человек мог оплатить снова». Поэтому топ снимается только если возвращаемый Boost последний
   (`latest_boost_for_listing`), `partial_refund` не снимает ничего, а повторная доставка вебхука
   безопасна благодаря `payments.refunded_at`. Всё это делает `apply_refunds` в том же **единственном**
-  писателе денег, что и начисление (§9), — вебхук по-прежнему ничего не решает.
+  писателе денег, что и начисление (§9), — вебхук по-прежнему ничего не решает. Возврат MIA-перевода
+  (`refund_manual_claim`) намеренно делает **те же три записи** (плюс тот же guard «только если Boost
+  последний»), а не отдельную бухгалтерию: у MIA нет API отзыва, деньги возвращает человек в банке, но
+  «деньги вернулись» для карты и для перевода обязаны означать одно и то же в БД — иначе MDL-строка
+  выручки молча остаётся завышенной после каждого ручного возврата.
 - **Дедупликация напоминаний живёт в `events`, а не в памяти процесса.** Счётчики в модуле
   (`_silence_alert_at`) после рестарта обнуляются, а обещание «не долбить админа один и тот же перевод
   каждые 60 секунд» от перезапуска не зависит: `event_recent(name, meta, hours)` + запись
@@ -1030,11 +1062,13 @@ d=sqlite3.connect('/opt/imobiliare/data/backup.db');s.backup(d);print('ok')"   #
 nginx 1.24 + certbot 2.9 **установлены**, `ufw allow 'Nginx Full'` открыт, порт 80 отвечает снаружи 200 —
 не хватает только hostname с A-записью (постоянный HTTPS вместо туннеля). Карточный рельс **задеплоен и
 проверен тестом без денег** (`test_card_rail.py` → `✅ MONEY RAIL OK`: начисление, возврат,
-`partial_refund`, истечение Boost, напоминание о переводе, сторож), но
+`partial_refund`, ручной возврат MIA, истечение Boost, напоминание о переводе, сторож), но
 `CARD_ENABLED=False`: нет аккаунта Lemon Squeezy, поэтому кнопка «💳 Картой» клиенту ещё не видна.
 MIA-рельс задеплоен и проверен (`apply_manual.sh`): цены 100 MDL / 400 Stars, обе ветки инструкции и
 HTML-экранирование под самотестом; `PAY_PHONE`/`PAY_NAME` пустые, поэтому покупатель пока видит
-«реквизиты пришлёт модератор». Закрыто 11.10: визитка в канале отредактирована на актуальную цену
+«реквизиты пришлёт модератор». Возврат такого перевода правится кнопкой `manref:`
+(`scheduler.refund_manual_claim`, §8 «Рельс 2») — MDL уходят из выручки, а Boost с топа снимается.
+Закрыто 11.10: визитка в канале отредактирована на актуальную цену
 (`post_promo.py 4`), кнопка Mini App в меню чата поставлена кодом (`set_menu_button.py`), ежедневный
 бэкап БД+`.env`+фото стоит на cron (`apply_backup.sh`, первый снимок проверен `integrity_check`).
 
@@ -1058,7 +1092,8 @@ HTML-экранирование под самотестом; `PAY_PHONE`/`PAY_NA
 6. Нет отчёта по источникам трафика (`events.start.meta` уже пишет метки — данные есть, отчёта нет).
 7. Вывод денег: LS платит на банковский счёт после верификации аккаунта (Banking); звёзды — только через
    Fragment в GRAM; местный эквайринг MD и «нормальный учёт» требуют ÎI/SRL — теперь это опция, а не блокер.
-   Возврат по MIA остаётся ручным (у схемы нет API отзыва перевода, §8 «Рельс 2»).
+   Возврат по MIA по-прежнему делает человек в банковском приложении (у схемы нет API отзыва), но
+   бухгалтерия после этого правится кнопкой `manref:` (§8 «Рельс 2»).
 
 ---
 
@@ -1117,7 +1152,8 @@ HTML-экранирование под самотестом; `PAY_PHONE`/`PAY_NA
 | Двигатель | нудж: после 2 дней, кулдаун 4 дня, проход каждые 6 ч; **карточный ящик, возвраты, молчание кассы и напоминания о переводах — каждые `CARD_TICK_SECONDS=60` с** |
 | `order_ref` | чем оплачен Boost: **`ls:<order_id>`** (карта) / **`tg:<telegram_payment_charge_id>`** (Stars) / **`manual:<boost_id>`** (перевод). Возврат ищет строку `boosts` именно по нему — без `order_ref` возврат найти платёж не может |
 | Возврат / чарджбек | статусы заказа LS: `pending \| failed \| paid \| refunded \| partial_refund \| fraudulent`. Снимаем Boost и минусуем выручку только при `refunded` и `fraudulent`; `partial_refund` **не** трогает ни Boost, ни выручку. Топ объявления снимается только если возвращённый Boost был последним оплаченным (`latest_boost_for_listing`), иначе остался более поздний платёж |
-| Напоминание о переводе | `MANUAL_REMIND_HOURS = 6` — заявка «я перевёл» без подтверждения админа пинается админу раз в 6 ч; дедупликация живёт в `events` (`manual_remind`, `meta = boost_id`), а не в памяти процесса ⇒ переживает рестарт |
+| Возврат перевода (MIA) | кнопки `manref:` → `manrefyes:` в сообщении админа после `manapp`; `scheduler.refund_manual_claim()` ищет платёж по `payments.telegram_charge_id = 'manual:<boost_id>'`, ставит `refunded_at`, `boosts.status='refunded'` и снимает топ, если Boost был последним. Автоматического отзыва перевода не существует — деньги всегда возвращает человек в своём банке |
+| Напоминание о переводе | `MANUAL_REMIND_HOURS = 6` — заявка «я перевёл» без подтверждения админа приходит админу раз в 6 ч; дедупликация живёт в `events` (`manual_remind`, `meta = boost_id`), а не в памяти процесса ⇒ переживает рестарт |
 | Истечение Boost | `notify_expired_boosts` предлагает купить Boost заново в окне **48 ч** после `boosted_until`; один раз на объявление (строка `events` с `name='boost_expired'` и `meta = boosted_until`) |
 | Бэкап | cron `03:00` ежедневно, `/opt/imobiliare/data/backups/imobiliare-<UTC>.db` + `<...>.db.env` (0600) + `photos-latest.tgz`, ротация **14 дней**, каждый снимок проходит `PRAGMA integrity_check`; лог — `/var/log/imobiliare-backup.log` |
 | SSH-защита | fail2ban, jail `sshd`: `maxretry=5`, `findtime=10m`, `bantime=1h`, `backend=systemd`, `ignoreip` = 127.0.0.1/8 + ::1 + адрес администратора; drop-in `/etc/fail2ban/jail.d/imobiliare.conf`; `PermitRootLogin prohibit-password` — **только по явному желанию** (`harden_ssh.sh --disable-root-password`) |
