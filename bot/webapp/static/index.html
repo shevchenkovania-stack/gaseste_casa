@@ -161,9 +161,9 @@ async function openDetail(id) {
     ${it.description?`<div class="desc">${esc(it.description)}</div>`:""}
   </div>
   <div class="actions">
-    <button class="btn" id="contactBtn" onclick="revealContact(${it.id})">📞 Связаться с владельцем</button>
+    <button class="btn" id="contactBtn" onclick="revealContact(${it.id})">📞 Показать контакт</button>
     <div class="contact-info" id="contactInfo"></div>
-    ${it.owner_tg === MY_ID ? `<button class="btn sec" onclick="toBot('/startapp boost:${it.id}')">\u{1F680} Поднять объявление (Boost) — 50 ⭐</button>` : ""}
+    ${it.owner_tg === MY_ID ? `<button class="btn sec" onclick="toBot('/startapp boost:${it.id}')">\u{1F680} Поднять объявление (Boost)</button>` : ""}
     <button class="btn sec" onclick="closeSheet()">← К списку</button>
   </div>`;
   $("sheet").classList.add("open");
@@ -179,7 +179,7 @@ async function revealContact(id) {
     if (c.tg) html += (html?" · ":"")+`<a href="${esc(c.tg)}">Telegram</a>`;
     $("contactInfo").innerHTML = html || "Контакт не указан";
     $("contactBtn").textContent = "📞 Показать ещё раз";
-  } catch(e) { $("contactBtn").textContent = "📞 Связаться с владельцем"; }
+  } catch(e) { $("contactBtn").textContent = "📞 Показать контакт"; }
 }
 
 function closeSheet(){ $("sheet").classList.remove("open"); }
