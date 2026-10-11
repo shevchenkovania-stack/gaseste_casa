@@ -45,11 +45,17 @@ async def main() -> None:
     me = await bot.get_me()
     log.info("Bot started: @%s", me.username)
 
-    for admin_id in config.ADMIN_IDS:
-        try:
-            await bot.send_message(admin_id, "\u2705 ChirieBot запущен и готов к работе.")
-        except Exception:
-            pass
+    # startup notice for admins, debounced through the DB (note_startup): the FIRST start
+    # in an hour is reported, repeated ones stay silent - otherwise a crash loop or a run
+    # of deploys buries the admin in "запущен" messages.
+    notify, starts = await db.note_startup()
+    log.info("Starts in the last hour: %d (admin notified: %s)", starts, notify)
+    if notify:
+        for admin_id in config.ADMIN_IDS:
+            try:
+                await bot.send_message(admin_id, "\u2705 ChirieBot запущен и готов к работе.")
+            except Exception:
+                pass
 
     job = None
     try:

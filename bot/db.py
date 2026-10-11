@@ -602,6 +602,20 @@ async def log_event(name: str, user_id: int | None = None, listing_id: int | Non
     await db.commit()
 
 
+async def note_startup(window_minutes: int = 60) -> tuple[bool, int]:
+    """Records a bot start. Admins get the startup message only for the FIRST start in
+    `window_minutes`: a crash loop or a run of deploys must not spam them (it did - 35
+    messages over two days). Returns (should_notify, starts_in_window)."""
+    db = _db()
+    cur = await db.execute(
+        "SELECT COUNT(*) c FROM events WHERE name='startup' AND created_at > datetime('now', ?)",
+        (f"-{window_minutes} minutes",),
+    )
+    prev = (await cur.fetchone())["c"]
+    await log_event("startup", meta=str(prev + 1))
+    return prev == 0, prev + 1
+
+
 async def event_recent(name: str, meta: str | None, hours: int) -> bool:
     """Was this exact event logged inside the window? Reminder dedup, restart-safe by design."""
     q = ("SELECT 1 FROM events WHERE name = ? AND IFNULL(meta,'') = IFNULL(?, '') "
