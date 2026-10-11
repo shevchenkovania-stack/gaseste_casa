@@ -12,8 +12,8 @@ from handlers import boost as boost_h
 router = Router()
 
 WELCOME = (
-    "Привет! \U0001F3E0 Это <b>ChirieBot</b> — аренда и продажа недвижимости в Кишинёве.\n\n"
-    "Найди жильё или размести своё объявление.\n"
+    "Привет! \U0001F3E0 <b>Găsește Casa</b> — квартиры и дома в Кишинёве, напрямую от владельцев.\n\n"
+    "Это <b>не агентство</b>: объявления размещают сами хозяева, бот только модерирует и показывает.\n"
     "\U0001F916 Размещение <b>бесплатное</b>. Хочешь выделиться — подними объявление через Boost."
 )
 
@@ -90,10 +90,12 @@ async def cb_add(cb: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(Command("paysupport"))
 async def cmd_paysupport(message: Message) -> None:
-    import config
-    contact = config.CONTACT_URL or "@support"
+    # a dead "@support" handle is itself a scam signal: only name a contact that actually exists.
+    # the fallback router forwards plain-text DMs to the admins, so "this chat" is a real line.
+    where = config.CONTACT_URL or "напиши сообщение прямо в этот чат"
     await message.answer(
-        f"Вопросы и возвраты по оплате (карта / перевод MDL / Telegram Stars): {contact}",
+        f"\U0001F4B3 Вопросы и возвраты по оплате (перевод MDL / Telegram Stars): {where} — "
+        "передадим модератору.",
         reply_markup=keyboards.back_menu(),
     )
 

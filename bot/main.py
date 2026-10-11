@@ -9,7 +9,7 @@ from aiogram.types import BotCommand
 import config
 import db
 import scheduler
-from handlers import add, admin, boost, browse, profile, start
+from handlers import add, admin, boost, browse, fallback, profile, start
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("chiriebot")
@@ -38,6 +38,8 @@ async def main() -> None:
     dp.include_router(profile.router)
     dp.include_router(boost.router)
     dp.include_router(admin.router)
+    # last: only sees plain text that no other router handled (no command, no active FSM state)
+    dp.include_router(fallback.router)
 
     await set_commands(bot)
     me = await bot.get_me()
