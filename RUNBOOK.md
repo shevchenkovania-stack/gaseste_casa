@@ -104,6 +104,8 @@ deploy/                  всё, что связано с сервером и п
   set_logo.py (поставить logo.png на бота И на канал; setMyProfilePhoto понимает фото только через
   attach://), rename.py (единое видимое имя «Găsește Casa · Недвижимость Кишинёва» на боте и канале —
   idempotent, печатает `✅ RENAMED OK`; chiriebot остаётся только внутренним кодовым именем в логах),
+  pin_roles.py (описание канала + закреплённый пост-навигация «бот=инструмент, канал=лента,
+  доска=витрина»; one-shot, при перезапуске повторит пост),
   test_gift.py (E2E подарочных поднятий: грант → кнопка «🎁» → списание → топ,
   без единой строки в payments, сам себя убирает → `✅ GIFT LOOP OK`),
   test_webapp.sh, apply_webapp.sh, fix_test.sh
@@ -319,11 +321,12 @@ d.execute('select sum(amount) from payments where currency=\"MDL\"').fetchone())
 |---|---|---|---|
 | `menu:home/search/add/my/help` | start.py, browse.py, add.py, profile.py | — | главное меню и входы в сценарии |
 | `cancel` | везде (fallback-кнопки) | — | отмена FSM |
-| `deal:` `ptype:` `rooms:` `district:` `area:skip` `floor:skip` `desc:skip` `phone:skip` `add:photos_done` `add:photos_skip` `add:confirm` | add.py | id / `skip` | шаги подачи объявления |
-| `fdeal:` `fptype:` `fdist:` `page:next` `page:prev` `noop` | browse.py | значение или `all` | фильтры поиска и пагинация |
+| `deal:` `ptype:` `rooms:` `district:` `add:next` `skip:next` `add:back` `add:photos_done` `add:photos_skip` `add:confirm` | add.py | значение | шаги подачи: панель 1/5 (сделка+тип+комнаты), район, пропуск деталей, шаг назад |
+| `sf:deal:` `sf:ptype:` `sf:rooms:` `sf:pick:district` `sf:pick:price` `sf:dist:` `sf:price:` `sf:panel` `sf:go` `sf:reset` `page:next` `page:prev` `noop` | browse.py | значение/`all` | единая панель фильтров, пикеры района/цены, пагинация (всё edit-in-place) |
 | `view:` | browse.py | listing_id | карточка объявления (+inc_views, если не владелец) |
 | `contact:` | browse.py | listing_id | показать телефон/юзернейм владельца |
-| `boost:` | boost.py | listing_id | оффер Boost (все включённые рельсы) |
+| `boost:` | boost.py | listing_id | оффер Boost (все включённые рельсы); при `manual_pending` — вместо оффера «⏳ платёж на проверке» |
+| `gift:` | boost.py | listing_id | списать подарочное поднятие (`users.boost_credits`, статус `gift`, денег не касается) |
 | `card:` | boost.py | listing_id | создать LS checkout и дать URL-кнопку «🔗 Открыть оплату картой» |
 | `boostpay:` | boost.py | listing_id | `send_invoice` в XTR |
 | `manual:` | boost.py | listing_id | `keyboards.manual_pitch`: шаги MIA/перевода + копируемый блок |
@@ -331,21 +334,25 @@ d.execute('select sum(amount) from payments where currency=\"MDL\"').fetchone())
 | `mod:approve:` `mod:reject:` | admin.py | listing_id | модерация |
 | `manapp:` `manrej:` | admin.py | boost_id | подтвердить / отклонить ручной платёж |
 | `manref:` `manrefyes:` | admin.py | boost_id | подтвердить возврат MIA-перевода (два тапа: спросить → снять деньги с выручки и с топа) |
-| `back:search` | browse.py | — | вернуться к результатам |
+| `back:search` | browse.py | — | вернуться к результатам (или к панели фильтров, если фильтров не было) |
 
-Состояния FSM: `AddListing = deal, ptype, rooms, district, price, area, floor, description, phone, photos, confirm`
-(11 состояний; подписи в тексте — «Шаг 1/8…», это косметика). `Search = deal, ptype, district, results`.
-Хранилище состояний — MemoryStorage (не сохраняется между рестартами: недоподанное объявление просто теряется,
-это осознанно принято как приемлемое).
+Состояния FSM: `AddListing = specs, district, price, area, floor, description, phone, photos, confirm`
+(9 состояний; подписи «Шаг 1/5…», четыре необязательных экрана деталей делят один шаг 4/5;
+«⬅️ Назад» идёт по `STEP_ORDER` и сохраняет уже введённое). `Search = on` — одно состояние:
+панель, пикеры и результаты редактируют одно и то же сообщение. Хранилище состояний — MemoryStorage
+(не сохраняется между рестартами: недоподанное объявление просто теряется, это осознанно принято).
 
 ---
 
 ## 7. Пользовательские сценарии (как выглядит изнутри)
 
-**Подача объявления:** `/start` → «➕ Разместить объект» → 8 шагов вопросов (тип сделки, тип объекта,
-комнаты, район из `constants.DISTRICTS`, цена числом, площадь/этаж — можно «Пропустить», описание,
-телефон) → 1–10 фото (берётся `message.photo[-1].file_id`) → сводка «✅ Опубликовать» → `db.create_listing(status='pending')`
+**Подача объявления:** `/start` → «➕ Разместить объект» → «Шаг 1/5» — одна панель: сделка + тип +
+комнаты (чипы с ✓, «Далее» проверяет, что всё выбрано) → «Шаг 2/5» район из `constants.DISTRICTS` →
+«Шаг 3/5» цена числом → необязательные детали (площадь/этаж/описание/телефон — «Пропустить ⏭»,
+«⬅️ Назад» возвращает на шаг назад и сохраняет всё введённое) → «Шаг 5/5» 1–10 фото
+(берётся `message.photo[-1].file_id`) → сводка «✅ Опубликовать» → `db.create_listing(status='pending')`
 → `events.listing_created` → всем админам карточка с кнопками «Одобрить/Отклонить».
+Кнопочные переходы редактируют одно сообщение (`_goto`), чат не засоряется.
 
 **Модерация:** `mod:approve` → `status='active'` → владельцу «одобрено» + **`publish.publish_listing`**
 (скачать фото в `PHOTOS_DIR` как `{id}_{i}.jpg`, затем в канал: `send_media_group` с caption
@@ -357,7 +364,9 @@ d.execute('select sum(amount) from payments where currency=\"MDL\"').fetchone())
 ⭐ в начале если бустнутый) по 10 на страницу → карточка.
 
 **Boost из бота:** карточка своего объявления → «🚀 Поднять (Boost)» → оффер со всеми включёнными
-рельсами (карта → MDL → Stars). Чужое объявление — «Поднять можно только своё».
+рельсами (карта → MDL → Stars). Чужое объявление — «Поднять можно только своё». Если заявка
+«я перевёл» уже висит (`manual_pending`) — вместо оффера «⏳ платёж на проверке» (защита от двойного
+перевода); если Boost уже активен — в оффере строка «⚡ активен до <дата> — новый продлится».
 Карточный путь: «💳 Картой $5.00» → бот создаёт LS checkout → URL-кнопка на платёжную страницу →
 покупатель платит → LS стучится вебхуком → бот сам начисляет Boost и пишет покупателю и админам.
 
