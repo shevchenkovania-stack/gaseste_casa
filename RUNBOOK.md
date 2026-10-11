@@ -108,6 +108,9 @@ deploy/                  всё, что связано с сервером и п
   доска=витрина»; one-shot, при перезапуске повторит пост),
   test_gift.py (E2E подарочных поднятий: грант → кнопка «🎁» → списание → топ,
   без единой строки в payments, сам себя убирает → `✅ GIFT LOOP OK`),
+  test_all.py (E2E непокрытого: поиск-фильтры db+webapp API, поднятие-первым, рельсы оплаты Stars+MIA
+  (is_test/XTEST — REAL_REVENUE не трогает) и возврат; baseline на входе=на выходе, сам себя убирает →
+  `✅ ALL LOOP OK`),
   test_webapp.sh, apply_webapp.sh, fix_test.sh
 MISSION.md / STATUS.md / GROWTH.md / RUNBOOK.md / TODO.md (бэклог: что реализуем потом) /
 OUTREACH.md (боевой комплект аутрича: офер 🎁, тексты, контакты, трекер)

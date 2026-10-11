@@ -76,7 +76,17 @@ ptype_kb/options_kb/districts_kb/confirm_kb/skip_kb` вырезаны, табл�
 хвост имени = роль — бот «· Недвижимость Кишинёва» (инструмент), канал «· Лента объектов» (только чтение),
 страница «· Доска объявлений» + чип в `<h1>`; слово «бот» в имя НЕ вписываем (Telegram сам помечает его
 ботом и показывает @gaseste_casa_bot), «админ-панель» — тем более (это инструмент пользователя, не панель
-модератора). Переименование idempotent через `deploy/rename.py` (два разных имени) → `✅ RENAMED OK`.
+модератора). Переименование idempotent через `deploy/rename.py` (два разных имени) → `✅ RENAMED OK`;
+(27) **сквозной прогон ВСЕХ функций на проде с нулевым остатком** (`deploy/test_all.py` докрывает то, чего
+не было в `test_publish`/`test_gift`: **поиск** — фильтры deal/district/rooms/price_max через реальный
+`db.search_listings`+`count_search_listings` и отдача тех же выдачи через Mini App API
+(`/api/listings?deal=rent&district=Centru`), **порядок** — поднятое объявление идёт первым в выдаче,
+**оплата** — оба боевых рельса на уровне детерминированной логики БД (Stars: `on_paid`-письма + `is_test`/XTEST
+чтобы не тронуть REAL_REVENUE; MIA: `manual_pending` → approve → `manual` + booking; возврат: `refunded_at`
++ снятие с топа). Тест берёт baseline (списки/события/юзеры/boosts/payments/revenue_stars/revenue_mdl) на входе
+и на выходе, любое несовпадение = падение; прогнан вместе с `test_publish`+`test_gift` → `✅ ALL LOOP OK` +
+`✅ BOARD PIPELINE OK` + `✅ GIFT LOOP OK`, `audit.py` подтвердил остаток (users 2, listings 0, boosts 0,
+payments 0, revenue 0/0), обе службы `active`.
 
 ---
 
