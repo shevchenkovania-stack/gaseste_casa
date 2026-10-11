@@ -29,12 +29,14 @@ async def show_menu(target: Message, first_name: str | None = None) -> None:
 
 
 @router.message(CommandStart(deep_link=True))
-async def cmd_start_deep(message: Message) -> None:
+async def cmd_start_deep(message: Message, state: FSMContext) -> None:
     """t.me/gaseste_casa_bot?start=<payload> - remember where the user came from.
 
     A `share_<id>` payload means the user arrived from a forwarded listing card: land them straight
     on that object (with its contact/share buttons), then the menu. This is the receiving end of the
     referral loop - every shared card is an advert that opens the product one tap before 'разместить своё'.
+    `add` / `boost_<id>` come from the Mini App buttons (openTelegramLink) and go straight into the
+    wizard / boost offer - ?start= cannot carry a colon, so these use underscores.
     """
     payload = (message.text or "").partition(" ")[2]
     u = await db.get_or_create_user(
@@ -51,6 +53,17 @@ async def cmd_start_deep(message: Message) -> None:
             if row and row["status"] == "active":
                 await db.inc_views(listing_id)
                 await render.send_listing(message.bot, message.chat.id, row, owner=False)
+    if payload == "add":
+        await add_h.begin(message, state)
+        return
+    if payload.startswith("boost_"):
+        try:
+            listing_id = int(payload.split("boost_", 1)[1])
+        except ValueError:
+            listing_id = None
+        if listing_id:
+            await boost_h.offer_flow(message, message.from_user, listing_id)
+            return
     await show_menu(message, message.from_user.first_name)
 
 

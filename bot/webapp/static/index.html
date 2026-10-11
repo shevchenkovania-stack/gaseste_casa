@@ -87,7 +87,7 @@ select, input[type=number] { flex: 1; min-width: 0; padding: 8px 10px; border-ra
 <div class="empty" id="empty" style="display:none">
   <b>Здесь пока пусто 😕</b>
   Размести своё объявление бесплатно — открой бота и нажми «Разместить объект».
-  <div style="margin-top:14px"><button class="btn" onclick="toBot('menu:add')">➕ Разместить объявление</button></div>
+  <div style="margin-top:14px"><button class="btn" onclick="toBot('add')">➕ Разместить объявление</button></div>
 </div>
 <button class="btn sec" id="more" style="display:none; margin:0 14px">Показать ещё</button>
 
@@ -101,6 +101,7 @@ const tg = window.Telegram?.WebApp;
 tg?.ready(); tg?.expand();
 const INIT = tg?.initData || "";
 const MY_ID = tg?.initDataUnsafe?.user?.id || 0;
+const BOT_URL = "{{BOT_URL}}"; // replaced by webapp/app.py on serve (config-driven, no hardcode)
 const DISTRICTS = ["Центр","Ботаника","Буюканы","Рышкановка","Чеканы","Дурлешты","Кодры","Стэучень","Кондрица","Бачой","Криково","Сынджера","Тохатин","Бубуечь","Другое"];
 
 const state = { deal:"", district:"", ptype:"", rooms:"", price_max:"", page:1, total:0 };
@@ -145,7 +146,11 @@ async function load(append=false) {
   $("count").textContent = s.active ? s.active+" объявл." : "";
 }
 
-function toBot(data) { tg?.openTelegram?.({ data }); }
+function toBot(startParam) {
+  // tg.openTelegram does NOT exist - only openTelegramLink, and ?start= allows [A-Za-z0-9_-] only.
+  const url = BOT_URL + "?start=" + encodeURIComponent(startParam);
+  if (tg && tg.openTelegramLink) tg.openTelegramLink(url); else window.open(url, "_blank");
+}
 
 async function openDetail(id) {
   let it;
@@ -167,7 +172,7 @@ async function openDetail(id) {
   <div class="actions">
     <button class="btn" id="contactBtn" onclick="revealContact(${it.id})">📞 Показать контакт</button>
     <div class="contact-info" id="contactInfo"></div>
-    ${it.owner_tg === MY_ID ? `<button class="btn sec" onclick="toBot('/startapp boost:${it.id}')">\u{1F680} Поднять объявление (Boost)</button>` : ""}
+    ${it.owner_tg === MY_ID ? `<button class="btn sec" onclick="toBot('boost_${it.id}')">\u{1F680} Поднять объявление (Boost)</button>` : ""}
     <button class="btn sec" onclick="closeSheet()">← К списку</button>
   </div>`;
   $("sheet").classList.add("open");

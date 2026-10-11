@@ -4,7 +4,6 @@ from urllib.parse import quote
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 
 import config
-from constants import DEAL_LABELS, PTYPE_LABELS
 
 RENT = "\U0001F3E0 Аренда"
 SALE = "\U0001F4B0 Продажа"
@@ -29,54 +28,6 @@ def main_menu() -> InlineKeyboardMarkup:
     if share:
         kb.append([InlineKeyboardButton(text="\U0001F4E4 Позвать на Găsește Casa", url=share)])
     return InlineKeyboardMarkup(inline_keyboard=kb)
-
-
-def deal_kb(prefix: str = "deal") -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton(text=v, callback_data=f"{prefix}:{k}")] for k, v in DEAL_LABELS.items()]
-    rows.append([InlineKeyboardButton(text="\u2b05\uFE0F Отмена", callback_data="cancel")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def ptype_kb(prefix: str = "ptype") -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton(text=v, callback_data=f"{prefix}:{k}")] for k, v in PTYPE_LABELS.items()]
-    rows.append([InlineKeyboardButton(text="\u2b05\uFE0F Отмена", callback_data="cancel")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def options_kb(prefix: str, options: list, back: str | None = "cancel") -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton(text=str(o), callback_data=f"{prefix}:{o}")] for o in options]
-    if back:
-        rows.append([InlineKeyboardButton(text="\u2b05\uFE0F Отмена", callback_data=back)])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def districts_kb(prefix: str = "district") -> InlineKeyboardMarkup:
-    from constants import DISTRICTS
-    rows = []
-    pair: list[InlineKeyboardButton] = []
-    for d in DISTRICTS:
-        pair.append(InlineKeyboardButton(text=d, callback_data=f"{prefix}:{d}"))
-        if len(pair) == 2:
-            rows.append(pair)
-            pair = []
-    if pair:
-        rows.append(pair)
-    rows.append([InlineKeyboardButton(text="\u2b05\uFE0F Отмена", callback_data="cancel")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def confirm_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="\u2705 Опубликовать", callback_data="add:confirm")],
-        [InlineKeyboardButton(text="\u2b05\uFE0F Отмена", callback_data="cancel")],
-    ])
-
-
-def skip_kb(prefix: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Пропустить \u23ED", callback_data=f"{prefix}:skip")],
-        [InlineKeyboardButton(text="\u2b05\uFE0F Отмена", callback_data="cancel")],
-    ])
 
 
 def share_url(listing_id: int | None = None) -> str | None:

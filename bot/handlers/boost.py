@@ -24,14 +24,28 @@ async def offer_flow(target: Message, from_user, listing_id: int) -> None:
     if row["user_id"] != user["id"]:
         await target.answer("Поднять можно только своё объявление.")
         return
+    # A buyer who already pressed «Я перевёл» must see a waiting room, not a second cashier:
+    # re-offering rails here invites a double transfer and a double claim.
+    if await db.find_boost(listing_id, "manual_pending"):
+        await target.answer(
+            f"⏳ <b>Платёж по объявлению #{listing_id} на проверке.</b>\n\n"
+            "Модератор сверит поступление и объявление само поднимется в топ — придёт "
+            "сообщение. Повторно переводить не нужно.",
+            parse_mode="HTML",
+            reply_markup=keyboards.main_menu(),
+        )
+        return
     await db.log_event("boost_click", user_id=user["id"], listing_id=listing_id)
     credits = user["boost_credits"] if "boost_credits" in user.keys() else 0
     note = ""
+    if row["boosted_until"]:
+        note += f"\n\n⚡ Boost уже активен до <b>{str(row['boosted_until'])[:10]}</b> — новый продлит срок."
     if config.CARD_ENABLED:
-        note = ("\n\nКартой — оплата на защищённой странице банка, Boost включается сам, "
-                "подтверждение менеджером не нужно.")
+        note += ("\n\nКартой — оплата на защищённой странице банка, Boost включается сам, "
+                 "подтверждение менеджером не нужно.")
     if credits > 0:
-        note = f"\n\n\U0001F381 У тебя есть <b>{credits}</b> подарочных поднятий — жми «Поднять бесплатно»." + note
+        note = (f"\n\n\U0001F381 У тебя есть <b>{credits}</b> подарочных поднятий — "
+                "жми «Поднять бесплатно»." + note)
     text = (
         f"\U0001F680 <b>Boost объявления #{listing_id}</b>\n\n"
         f"Твоё объявление будет показываться <b>первым</b> в поиске и выделяться \u2B50 "

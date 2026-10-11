@@ -95,7 +95,10 @@ def row_to_item(row, with_detail: bool = False) -> dict:
 # ---------- handlers ----------
 
 async def index(request: web.Request) -> web.StreamResponse:
-    return web.FileResponse(os.path.join(os.path.dirname(__file__), "static", "index.html"))
+    path = os.path.join(os.path.dirname(__file__), "static", "index.html")
+    with open(path, encoding="utf-8") as f:
+        html = f.read().replace("{{BOT_URL}}", config.BOT_URL or "https://t.me/gaseste_casa_bot")
+    return web.Response(text=html, content_type="text/html", charset="utf-8")
 
 
 async def api_listings(request: web.Request) -> web.Response:
