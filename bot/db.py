@@ -112,6 +112,11 @@ async def init_db() -> None:
 async def _migrate() -> None:
     """Additive column migrations for tables created before the column existed."""
     assert _conn is not None
+    cur = await _conn.execute("PRAGMA table_info(users)")
+    cols = {r["name"] for r in await cur.fetchall()}
+    if "boost_credits" not in cols:
+        # free top-raises granted to the first listing publishers (founders gift)
+        await _conn.execute("ALTER TABLE users ADD COLUMN boost_credits INTEGER NOT NULL DEFAULT 0")
     cur = await _conn.execute("PRAGMA table_info(listings)")
     cols = {r["name"] for r in await cur.fetchall()}
     if "nudged_at" not in cols:
@@ -366,6 +371,43 @@ async def log_boost(listing_id: int, user_id: int, stars: int, days: int, status
     return cur.lastrowid
 
 
+async def grant_gift_credits(user_id: int, amount: int, slots: int) -> bool:
+    """Founders gift: one-time grant of free top-raises, capped by total grantees.
+
+    Idempotent twice over: the UPDATE only fires while credits are still 0 (a user is granted
+    once), and the cap counts distinct granted users from events, so re-approving someone's
+    second listing cannot mint credits and cannot consume a second slot.
+    """
+    if amount <= 0:
+        return False
+    db = _db()
+    cur = await db.execute("SELECT COUNT(DISTINCT user_id) c FROM events WHERE name='gift_granted'")
+    used = (await cur.fetchone())["c"]
+    if used >= slots:
+        return False
+    cur = await db.execute(
+        "UPDATE users SET boost_credits = ? WHERE id = ? AND boost_credits = 0",
+        (amount, user_id),
+    )
+    if cur.rowcount == 0:
+        await db.commit()
+        return False
+    await log_event("gift_granted", user_id=user_id, meta=str(amount))
+    await db.commit()
+    return True
+
+
+async def spend_gift_credit(user_id: int) -> bool:
+    """Take one free raise. The WHERE keeps a double-tap from spending a credit that isn't there."""
+    db = _db()
+    cur = await db.execute(
+        "UPDATE users SET boost_credits = boost_credits - 1 WHERE id = ? AND boost_credits > 0",
+        (user_id,),
+    )
+    await db.commit()
+    return cur.rowcount > 0
+
+
 async def get_boost(boost_id: int):
     cur = await _db().execute("SELECT * FROM boosts WHERE id = ?", (boost_id,))
     return await cur.fetchone()
@@ -592,6 +634,9 @@ async def stats() -> dict:
         "refunds": "SELECT COUNT(*) c FROM payments WHERE refunded_at IS NOT NULL",
         "manual_waiting": "SELECT COUNT(*) c FROM boosts WHERE status='manual_pending'",
         "test_payments": "SELECT COUNT(*) c FROM payments WHERE currency = 'XTEST' OR is_test = 1",
+        # founders gift: how many got it and how many free raises are still in pockets
+        "gift_holders": "SELECT COUNT(*) c FROM events WHERE name='gift_granted'",
+        "gift_credits": "SELECT COALESCE(SUM(boost_credits),0) c FROM users WHERE boost_credits > 0",
     }.items():
         cur = await db.execute(q)
         row = await cur.fetchone()

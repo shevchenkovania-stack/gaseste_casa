@@ -56,6 +56,13 @@ NUDGE_AFTER_DAYS = int(os.getenv("NUDGE_AFTER_DAYS", "2"))
 NUDGE_COOLDOWN_DAYS = int(os.getenv("NUDGE_COOLDOWN_DAYS", "4"))
 NUDGE_INTERVAL_HOURS = int(os.getenv("NUDGE_INTERVAL_HOURS", "6"))
 
+# Founders gift: the first GIFT_SLOTS users whose listing gets approved receive GIFT_BOOSTS free
+# top-raises each. This is the outreach engine - "принеси объект, получи 10 поднятий бесплатно".
+# Free boosts never touch the payment rails: no payments rows, revenue stays honest.
+# GIFT_BOOSTS=0 disables the program entirely.
+GIFT_BOOSTS = int(os.getenv("GIFT_BOOSTS", "10"))
+GIFT_SLOTS = int(os.getenv("GIFT_SLOTS", "100"))
+
 CONTACT_URL = os.getenv("CONTACT_URL", "")
 
 # Public channel where approved listings are auto-posted (@username or -100... chat id)

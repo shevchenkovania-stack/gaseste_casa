@@ -43,6 +43,12 @@ async def moderate(cb: CallbackQuery, bot: Bot) -> None:
                 await publish.publish_listing(bot, row)
             except Exception:
                 pass  # publishing to channel/webapp must never block moderation
+            # founders gift: the first GIFT_SLOTS publishers get free raises - this is the
+            # headline of every outreach message, so it must arrive automatically, not by hand
+            if await db.grant_gift_credits(row["user_id"], config.GIFT_BOOSTS, config.GIFT_SLOTS):
+                note += (f"\n\n\U0001F381 Ты в первых {config.GIFT_SLOTS}: лови <b>{config.GIFT_BOOSTS} "
+                         f"подарочных поднятий</b> в топ — кнопка «\U0001F381 Поднять бесплатно» у каждого "
+                         "своего объявления, без денег.")
         else:
             note = f"\u274C Твоё объявление <b>#{listing_id}</b> отклонено модератором."
         try:
@@ -175,7 +181,8 @@ async def stats(message: Message) -> None:
         # both lines are "money that needs a human": a refund we may have to react to,
         # and a transfer the buyer already sent but nobody has ticked yet
         f"Возвратов/чарджбеков: {s['refunds']}\n"
-        f"Переводов ждут подтверждения: {s['manual_waiting']}"
+        f"Переводов ждут подтверждения: {s['manual_waiting']}\n"
+        f"🎁 Подарок выдан: {s['gift_holders']} чел., поднятий в карманах: {s['gift_credits']}"
     )
     await message.answer(text, parse_mode="HTML")
 

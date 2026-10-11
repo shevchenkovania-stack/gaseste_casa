@@ -194,9 +194,15 @@ def boost_pitch() -> str:
             f"место в поиске на <b>{config.BOOST_DAYS} дней</b>.")
 
 
-def boost_kb(listing_id: int) -> InlineKeyboardMarkup:
-    """All available payment rails, cheapest friction first."""
+def boost_kb(listing_id: int, gift_credits: int = 0) -> InlineKeyboardMarkup:
+    """All available payment rails, cheapest friction first - a free gift raise is always first."""
     rows = []
+    if gift_credits > 0:
+        # founders gift: free top-raises for the first publishers, spends no money and
+        # writes no payments row - the boost is booked with status 'gift'
+        rows.append([InlineKeyboardButton(
+            text=f"\U0001F381 Поднять бесплатно (осталось {gift_credits})",
+            callback_data=f"gift:{listing_id}")])
     if config.CARD_ENABLED:
         # hosted checkout: no card attached to Telegram and no acquiring contract needed
         rows.append([InlineKeyboardButton(text=f"\U0001F4B3 Картой {usd(config.CARD_PRICE_CENTS)}",

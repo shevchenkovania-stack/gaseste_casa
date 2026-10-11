@@ -102,8 +102,11 @@ deploy/                  всё, что связано с сервером и п
   test_publish.py (E2E «подача→модерация→канал→webapp», сам себя убирает → `✅ BOARD PIPELINE OK`),
   make_logo.py + logo.png (бренд: дом с замочной скважиной; перерисовать = `python deploy/make_logo.py`),
   set_logo.py (поставить logo.png на бота И на канал; setMyProfilePhoto понимает фото только через
-  attach://), test_webapp.sh, apply_webapp.sh, fix_test.sh
-MISSION.md / STATUS.md / GROWTH.md / RUNBOOK.md / TODO.md (бэклог: что реализуем потом)
+  attach://), test_gift.py (E2E подарочных поднятий: грант → кнопка «🎁» → списание → топ,
+  без единой строки в payments, сам себя убирает → `✅ GIFT LOOP OK`),
+  test_webapp.sh, apply_webapp.sh, fix_test.sh
+MISSION.md / STATUS.md / GROWTH.md / RUNBOOK.md / TODO.md (бэклог: что реализуем потом) /
+OUTREACH.md (боевой комплект аутрича: офер 🎁, тексты, контакты, трекер)
 .gitattributes           LF для .sh/.py/.service/.html (иначе Windows CRLF ломает bash на сервере) и
                         binary для .db/.png — `sed -i 's/\r$//'` остаётся страховкой, а не необходимостью
 ACCESS.md                (в .gitignore) SSH, пароли, IP, id бота/канала

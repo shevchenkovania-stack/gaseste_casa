@@ -25,17 +25,54 @@ async def offer_flow(target: Message, from_user, listing_id: int) -> None:
         await target.answer("Поднять можно только своё объявление.")
         return
     await db.log_event("boost_click", user_id=user["id"], listing_id=listing_id)
+    credits = user["boost_credits"] if "boost_credits" in user.keys() else 0
     note = ""
     if config.CARD_ENABLED:
         note = ("\n\nКартой — оплата на защищённой странице банка, Boost включается сам, "
                 "подтверждение менеджером не нужно.")
+    if credits > 0:
+        note = f"\n\n\U0001F381 У тебя есть <b>{credits}</b> подарочных поднятий — жми «Поднять бесплатно»." + note
     text = (
         f"\U0001F680 <b>Boost объявления #{listing_id}</b>\n\n"
         f"Твоё объявление будет показываться <b>первым</b> в поиске и выделяться \u2B50 "
         f"в течение <b>{config.BOOST_DAYS} дней</b>.\n\n"
         + keyboards.boost_pitch() + note
     )
-    await target.answer(text, parse_mode="HTML", reply_markup=keyboards.boost_kb(listing_id))
+    await target.answer(text, parse_mode="HTML", reply_markup=keyboards.boost_kb(listing_id, credits))
+
+
+@router.callback_query(F.data.startswith("gift:"))
+async def gift_raise(cb: CallbackQuery, bot: Bot) -> None:
+    """Spend one founders-gift credit: same top placement as a paid Boost, zero money."""
+    listing_id = int(cb.data.split(":", 1)[1])
+    row = await db.get_listing(listing_id)
+    await cb.answer()
+    if not row or row["status"] != "active":
+        await cb.message.answer("Объявление не найдено или не активно.")
+        return
+    user = await db.get_or_create_user(cb.from_user.id, cb.from_user.username, cb.from_user.first_name)
+    if row["user_id"] != user["id"]:
+        await cb.message.answer("Поднять можно только своё объявление.")
+        return
+    if not await db.spend_gift_credit(user["id"]):
+        await cb.message.answer("Подарочные поднятия закончились \U0001F625 Дальше — Boost за 100 MDL или Stars.")
+        return
+    await db.boost_listing(listing_id, config.BOOST_DAYS)
+    await db.log_boost(listing_id, user["id"], 0, config.BOOST_DAYS, status="gift")
+    await db.log_event("gift_used", user_id=user["id"], listing_id=listing_id)
+    left = (await db.get_user_by_tg_id(cb.from_user.id))["boost_credits"]
+    await cb.message.answer(
+        f"\U0001F381 Подарок сработал: объявление <b>#{listing_id}</b> в топе на "
+        f"<b>{config.BOOST_DAYS} дней</b>, без денег.\nОсталось подарочных поднятий: <b>{left}</b>",
+        parse_mode="HTML",
+        reply_markup=keyboards.main_menu(),
+    )
+    for admin in config.ADMIN_IDS:
+        try:
+            await bot.send_message(admin, f"\U0001F381 Подарочный Boost: #{listing_id} "
+                                          f"(остаток у владельца {left})")
+        except Exception:
+            pass
 
 
 @router.callback_query(F.data.startswith("boost:"))
