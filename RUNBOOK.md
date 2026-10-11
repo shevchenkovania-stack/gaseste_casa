@@ -924,6 +924,14 @@ d=sqlite3.connect('/opt/imobiliare/data/backup.db');s.backup(d);print('ok')"   #
 (`git checkout <sha> -- bot/`) и scp-ом сверху, затем рестарт.
 История коммитов и есть источник правды: `git log --oneline`.
 
+**Сверка «прод = git» (деплой же копированием, drift возможен).** `run.ps1` стрипает CRLF, а `.gitattributes`
+держит в репозитории LF, поэтому сравнивать надо LF-байты, а не рабочий Windows-файл как есть. С одной
+стороны: `powershell -File deploy/run.ps1 bot/config.py "md5sum /opt/imobiliare/bot/*.py
+/opt/imobiliare/bot/handlers/*.py"`; с другой — те же файлы локально, нормализованные к LF:
+`foreach ($f in (gci bot -r -f -i *.py)) { $b=[Text.Encoding]::UTF8.GetBytes(([IO.File]::ReadAllText($f) -replace "\r\n","\n"));
+"$((Get-FileHash -Algorithm MD5 -InputStream [IO.MemoryStream]::new($b)).Hash.ToLower())  $($f.Name)" }`
+— хеши должны совпасть точь-в-точь (проверено 11.10: scheduler/db/keyboards/admin сходятся до байта).
+
 **Кто стучится в SSH.** Сервисы и `.env` живут под root, а `sshd -T` на сервере даёт
 `permitrootlogin yes` + `passwordauthentication yes` на 22 порту — то есть наружу открыт вход «root +
 пароль» для машины, которая знает BOT_TOKEN и секрет вебхука. `deploy/harden_ssh.sh` (выполнен 11.10)
