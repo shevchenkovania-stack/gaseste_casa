@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
-<title>ChirieBot — недвижимость Кишинёва</title>
+<title>Găsește Casa · Недвижимость Кишинёва</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
 :root {
@@ -25,7 +25,7 @@ h1 .count { font-size: 12px; color: var(--hint); font-weight: 400; }
 .chip { flex: 0 0 auto; padding: 7px 14px; border-radius: 20px; background: var(--card); color: var(--text); border: none; font-size: 13px; cursor: pointer; }
 .chip.on { background: var(--accent); color: var(--accent-text); }
 select, input[type=number] { flex: 1; min-width: 0; padding: 8px 10px; border-radius: 10px; border: 1px solid var(--card); background: var(--bg); color: var(--text); font-size: 14px; }
-.row { display: flex; gap: 8px; }
+.row { display: flex; gap: 8px; flex-wrap: wrap; }
 .grid { display: flex; flex-direction: column; gap: 12px; padding: 12px 14px; }
 .card { background: var(--card); border-radius: var(--radius); overflow: hidden; cursor: pointer; position: relative; }
 .card img { width: 100%; height: 190px; object-fit: cover; display: block; }
@@ -61,7 +61,7 @@ select, input[type=number] { flex: 1; min-width: 0; padding: 8px 10px; border-ra
 </head>
 <body>
 <header>
-  <h1>🏠 Недвижимость · Кишинёв <span class="count" id="count"></span></h1>
+  <h1>🏠 Găsește Casa <span class="count" id="count"></span></h1>
   <div class="filters">
     <div class="chips" id="dealChips">
       <button class="chip on" data-deal="">Все</button>
@@ -70,6 +70,10 @@ select, input[type=number] { flex: 1; min-width: 0; padding: 8px 10px; border-ra
     </div>
     <div class="row">
       <select id="district"><option value="">Все районы</option></select>
+      <select id="ptype">
+        <option value="">Любой тип</option><option value="apartment">Квартира</option>
+        <option value="house">Дом</option><option value="room">Комната</option>
+      </select>
       <select id="rooms">
         <option value="">Комнат: все</option><option value="1">1</option><option value="2">2</option>
         <option value="3">3</option><option value="4">4</option><option value="5">5+</option>
@@ -99,7 +103,7 @@ const INIT = tg?.initData || "";
 const MY_ID = tg?.initDataUnsafe?.user?.id || 0;
 const DISTRICTS = ["Центр","Ботаника","Буюканы","Рышкановка","Чеканы","Дурлешты","Кодры","Стэучень","Кондрица","Бачой","Криково","Сынджера","Тохатин","Бубуечь","Другое"];
 
-const state = { deal:"", district:"", rooms:"", price_max:"", page:1, total:0 };
+const state = { deal:"", district:"", ptype:"", rooms:"", price_max:"", page:1, total:0 };
 const $ = (id) => document.getElementById(id);
 
 async function api(path, opts={}) {
@@ -113,7 +117,7 @@ function esc(s){ return (s??"").toString().replace(/[&<>"']/g, c => ({"&":"&amp;
 
 function params() {
   const p = new URLSearchParams();
-  for (const k of ["deal","district","rooms","price_max"]) if (state[k]) p.set(k, state[k]);
+  for (const k of ["deal","district","ptype","rooms","price_max"]) if (state[k]) p.set(k, state[k]);
   p.set("page", state.page);
   return p.toString();
 }
@@ -191,9 +195,10 @@ $("dealChips").addEventListener("click", (e) => {
   b.classList.add("on"); state.deal = b.dataset.deal; state.page = 1; load();
 });
 $("district").innerHTML += DISTRICTS.map(d=>`<option>${d}</option>`).join("");
-["district","rooms","priceMax"].forEach(id => $(id).addEventListener("change", () => {
-  state.district = $("district").value; state.rooms = $("rooms").value;
-  state.price_max = $("priceMax").value; state.page = 1; load();
+["district","ptype","rooms","priceMax"].forEach(id => $(id).addEventListener("change", () => {
+  state.district = $("district").value; state.ptype = $("ptype").value;
+  state.rooms = $("rooms").value; state.price_max = $("priceMax").value;
+  state.page = 1; load();
 }));
 $("more").addEventListener("click", () => { state.page++; load(true); });
 

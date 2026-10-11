@@ -102,7 +102,9 @@ deploy/                  всё, что связано с сервером и п
   test_publish.py (E2E «подача→модерация→канал→webapp», сам себя убирает → `✅ BOARD PIPELINE OK`),
   make_logo.py + logo.png (бренд: дом с замочной скважиной; перерисовать = `python deploy/make_logo.py`),
   set_logo.py (поставить logo.png на бота И на канал; setMyProfilePhoto понимает фото только через
-  attach://), test_gift.py (E2E подарочных поднятий: грант → кнопка «🎁» → списание → топ,
+  attach://), rename.py (единое видимое имя «Găsește Casa · Недвижимость Кишинёва» на боте и канале —
+  idempotent, печатает `✅ RENAMED OK`; chiriebot остаётся только внутренним кодовым именем в логах),
+  test_gift.py (E2E подарочных поднятий: грант → кнопка «🎁» → списание → топ,
   без единой строки в payments, сам себя убирает → `✅ GIFT LOOP OK`),
   test_webapp.sh, apply_webapp.sh, fix_test.sh
 MISSION.md / STATUS.md / GROWTH.md / RUNBOOK.md / TODO.md (бэклог: что реализуем потом) /
