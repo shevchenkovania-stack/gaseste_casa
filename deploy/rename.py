@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
-"""Unify the visible brand name across Telegram: channel title + bot display name.
+"""Give each Telegram surface a role-distinct name under one brand.
 
-Root cause this fixes: the channel was created on day one as "Квартиры в Кишинёве | Chirie"
-(pre-brand) and the bot name said "Аренда" (now wrong - the board has sales too).
-One title everywhere; internal codename "chiriebot" stays in logs only.
+Why this exists: we had first collapsed bot + channel to the SAME name, which reads as two
+identical rows in the chat list = the "хаос" the founder flagged. One brand prefix is right,
+but the tail of the name must carry the ROLE so a person can tell them apart at a glance.
+The word "бот" stays out of the display name (Telegram already labels it as a bot + shows
+@gaseste_casa_bot); the tail is a discoverability keyword instead.
+
+  Bot    -> Găsește Casa · Недвижимость Кишинёва   (the tool: search, submit, payment)
+  Channel-> Găsește Casa · Лента объектов          (the feed: read-only)
+  (Mini App <title> = "... · Доска объявлений" lives in webapp/static/index.html)
 
 Run on prod from /opt/imobiliare/bot:  /opt/imobiliare/venv/bin/python rename.py
 Idempotent: prints current names, sets the new ones, verifies via get_chat/get_me.
@@ -14,7 +20,8 @@ from aiogram import Bot
 
 import config
 
-TITLE = "Găsește Casa · Недвижимость Кишинёва"
+BOT_TITLE = "Găsește Casa · Недвижимость Кишинёва"
+CHANNEL_TITLE = "Găsește Casa · Лента объектов"
 
 
 async def main() -> None:
@@ -24,15 +31,16 @@ async def main() -> None:
     chat = await bot.get_chat(config.CHANNEL_ID)
     print("channel title was:", chat.title)
 
-    await bot.set_my_name(name=TITLE, language_code="")
-    await bot.set_my_name(name=TITLE, language_code="ru")
-    await bot.set_chat_title(config.CHANNEL_ID, title=TITLE)
+    await bot.set_my_name(name=BOT_TITLE, language_code="")
+    await bot.set_my_name(name=BOT_TITLE, language_code="ru")
+    await bot.set_chat_title(config.CHANNEL_ID, title=CHANNEL_TITLE)
 
     me = await bot.get_me()
     chat = await bot.get_chat(config.CHANNEL_ID)
     print("bot name now: ", me.first_name)
     print("channel now:  ", chat.title)
-    print("✅ RENAMED OK" if me.first_name == TITLE and chat.title == TITLE else "⚠️ check failed")
+    ok = me.first_name == BOT_TITLE and chat.title == CHANNEL_TITLE
+    print("✅ RENAMED OK" if ok else "⚠️ check failed")
 
 
 asyncio.run(main())
