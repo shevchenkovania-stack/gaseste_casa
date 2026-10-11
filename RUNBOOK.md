@@ -46,8 +46,9 @@ bot/                     код бота и Mini App (один venv, один р
   publish.py             выкладка одобренного объявления: скачивание фото + пост в канал
   lemon.py               клиент Lemon Squeezy: создание checkout-ссылки, проверка подписи X-Signature,
                         разбор order-вебхука в карточку заказа (единственный модуль, знающий LS)
-  scheduler.py           фоновые задачи: Boost-нудж (двигатель выручки), применение карточных
-                        заказов и сторож молчащего вебхука
+  scheduler.py           фоновые задачи: применение карточных заказов, возвраты/чарджбеки, сторож
+                        молчащего вебхука, напоминания о неподтверждённых переводах, Boost-нудж и
+                        предложения купить снова тем, у кого Boost закончился
   requirements.txt       aiogram, aiosqlite, aiohttp, python-dotenv
   .env.example           шаблон ENV-файла (реальный .env в git не попадает)
   handlers/
@@ -77,11 +78,23 @@ deploy/                  всё, что связано с сервером и п
   apply_card.sh          / test_card_rail.py — приложить карточный рельс и проверить его без денег
   register_ls_webhook.py регистрация вебхука Lemon Squeezy через API LS (создаёт тестовый и боевой,
                         генерит секрет в .env, чистит вебхуки на умершем адресе, рестартует сервисы)
+  apply_backup.sh        ставит ежедневный бэкап: /opt/imobiliare/backup.py + cron 03:00 + ротация 14
+                        дней + снимок .env (0600) и фото; сам прогоняет первый снимок и проверяет
+                        integrity_check, печатает команды восстановления
+  run.ps1               Windows-помощник: scp файла на сервер и ssh-прогон с чистым UTF-8 выводом
+                        (длинный inline-ssh в PowerShell 5.1 ломается, поэтому только файлами;
+                        IP читается из ACCESS.md, сам файл ASCII; exit-код = код удалённой команды)
+  harden_ssh.sh         fail2ban на sshd (бан 1 ч после 5 неудач, свой IP в ignoreip) + опциональный
+                        `--disable-root-password` (root только по ключу), который отдельно требует
+                        подтверждения из журнала sshd — это единственная команда проекта, способная
+                        закрыть человеку доступ к его же серверу
   apply_nudge.sh, apply_manual.sh, verify_nudge.sh, verify_manual.sh, status.sh,
   cleanup_test.sh, test_money_path.py, make_demo.py, post_promo.py, audit.py, whoami.sh,
   seed.py, mk_tmp_listing.py, setup_channel.py, set_avatar*, make_avatar.py, test_render.py,
   test_publish.py, test_webapp.sh, apply_webapp.sh, fix_test.sh
 MISSION.md / STATUS.md / GROWTH.md / RUNBOOK.md
+.gitattributes           LF для .sh/.py/.service/.html (иначе Windows CRLF ломает bash на сервере) и
+                        binary для .db/.png — `sed -i 's/\r$//'` остаётся страховкой, а не необходимостью
 ACCESS.md                (в .gitignore) SSH, пароли, IP, id бота/канала
 ```
 
@@ -201,7 +214,8 @@ CREATE TABLE boosts (
     user_id INTEGER NOT NULL REFERENCES users(id),
     stars INTEGER NOT NULL,        -- цена в Stars; для ручных заявок туда пишется сумма в MDL
     days INTEGER NOT NULL,
-    status TEXT DEFAULT 'pending', -- pending | paid | manual_pending | manual | manual_rejected
+    status TEXT DEFAULT 'pending', -- pending | paid | manual_pending | manual | manual_rejected | refunded
+    order_ref TEXT,                -- миграция: что оплатило этот Boost — 'ls:<order_id>' | 'tg:<charge_id>' | 'manual:<boost_id>'
     created_at TEXT DEFAULT (datetime('now'))
 );
 CREATE TABLE payments (
@@ -213,6 +227,7 @@ CREATE TABLE payments (
     telegram_charge_id TEXT, provider_charge_id TEXT,  -- для карты = LS order identifier (UUID)
     amount REAL,                   -- миграция: реальная сумма в валюте платежа (MDL или USD)
     is_test INTEGER DEFAULT 0,     -- миграция: платёж в тестовом режиме провайдера
+    refunded_at TEXT,              -- миграция: деньги вернули → строка остаётся, в выручку не считается
     created_at TEXT DEFAULT (datetime('now'))
 );
 CREATE TABLE card_orders (         -- ВХОДЯЩИЙ ЯЩИК карточных платежей (пишет webapp, читает бот)
@@ -250,10 +265,22 @@ CREATE INDEX idx_listings_district ON listings(district);
   выдали в окне) и `card_orders_since(minutes)` (сколько доставок реально пришло в окне);
 - `get_user_by_tg_id(tg_id)` — читает покупателя, **не создавая** его (в отличие от
   `get_or_create_user`, который затёр бы NULL-ами username/first_name);
+- возвраты: `payments_refunds()` (оплаченные и уже применённые заказы, у которых `card_orders.status`
+  стал `refunded`/`fraudulent`, а `payments.refunded_at` ещё пуст), `mark_payment_refunded(id)`,
+  `find_boost_by_ref('ls:<order_id>')`, `latest_boost_for_listing(id)`, `unboost_listing(id)`;
+  `partial_refund` в выборку **не входит** — частично возвращенные деньги остаются выручкой и Boost
+  остаётся (статусы заказа LS проверены по API-докам: `pending | failed | paid | refunded |
+  partial_refund | fraudulent`);
+- напоминания: `manual_claims_waiting(older_than_hours)` (неподтверждённые MIA-заявки вместе с
+  телефоном плательщика с объявления и `waited_hours`), `boosts_that_just_expired(hours)` (объявления,
+  у которых Boost закончился, и про которые ещё не писали), `event_recent(name, meta, hours)` —
+  дедупликация напоминаний через `events`, поэтому она переживает рестарт;
 - `stats()` — пользователи, объявления, `boosts WHERE status IN ('paid','manual')`,
   `revenue_stars` (`XTR`, `is_test=0`), `revenue_mdl` (`amount`, `MDL`, `is_test=0`),
-  `revenue_card` (`amount`, валюта вне `XTR/MDL/XTEST`, `is_test=0`), `card_unapplied`
-  (не начисленные оплаченные карточные заказы = **индикатор здоровья вебхука**),
+  `revenue_card` (`amount`, валюта вне `XTR/MDL/XTEST`, `is_test=0`) — **все три линии дополнительно
+  с `refunded_at IS NULL`**, то есть возвращенные деньги в REAL_REVENUE не попадают;
+  `card_unapplied` (не начисленные оплаченные карточные заказы = **индикатор здоровья вебхука**),
+  `refunds` (сколько денег вернули), `manual_waiting` (сколько переводов ждут ручного подтверждения),
   `test_payments` (`XTEST` или `is_test=1`).
 
 Полезные ручные проверки (на сервере, `sqlite3` CLI не ставился — через venv-питон):
@@ -366,10 +393,15 @@ card:<id> (boost.card_offer) → проверка ownership → events.card_clic
   parse_order_event → card_orders (store_card_order, UNIQUE order_id) → 200
 scheduler.apply_card_orders (бот-процесс, каждые 60 с, ЕДИНСТВЕННЫЙ писатель денег):
   card_orders_to_apply (applied=0 AND status='paid')
-  → boost_listing(BOOST_DAYS) + boosts(status='paid', stars=0)
+  → boost_listing(BOOST_DAYS) + boosts(status='paid', stars=0, order_ref='ls:<order_id>')
   → payments(purpose='boost_card', currency=USD, amount=total/100,
               provider_charge_id=order_id, is_test=test_mode)
   → mark_card_order_applied + events.boost_card_paid + ЛС покупателю + ЛС каждому админу
+scheduler.apply_refunds (тот же тик, те же 60 с):
+  payments_refunds (applied=1, card_orders.status IN ('refunded','fraudulent'), refunded_at IS NULL)
+  → payments.refunded_at=now → boosts.status='refunded'
+  → unboost_listing, только если этот boost последний для объявления (более поздняя оплата ≠ снимаем)
+  → events.boost_refunded + ЛС владельцу + ЛС админам
 ```
 
 **Железные требования провайдера (иначе касса не работает):**
@@ -389,10 +421,14 @@ scheduler.apply_card_orders (бот-процесс, каждые 60 с, ЕДИН
   только `paid`. `test_mode=True` → начисляем Boost, но в `payments.is_test=1` и `purpose='boost_card_test'`,
   то есть в `REAL_REVENUE` такой платёж не попадает.
 
-**Что пока не автоматизировано (осознанный долг):** возврат/чарджбек от LS не снимает уже
-начисленный Boost — событие `order_refunded` сохраняется в `card_orders` (`status`), но
-`applied` не откатывается. До первых реальных продаж это ручной шаг админа (снять `boosted_until`);
-чинить, когда появятся возвраты.
+**Возврат и чарджбек (закрыто 11.10).** `order_refunded` прилетает тем же путём: `store_card_order`
+видит повторный `order_id` и только обновляет `status`, дальше `apply_refunds` помечает платёж
+`refunded_at`, ставит `boosts.status='refunded'` и снимает объявление с топа, если этот Boost был
+последним. Повторная доставка того же возврата ничего не делает (`refunded_at IS NULL` в выборке),
+`partial_refund` не трогает ничего — деньги, которые остались, настоящие. Возврат вычитается из всех
+трёх линий `REAL_REVENUE`. **Оставшийся долг:** у MIA нет API статуса/отзыва перевода (схема только
+push-платежи, проверяется выпиской в банке), поэтому возврат по MIA остаётся ручным: `boosted_until`
+снимает админ, а строки от MIA в `card_orders` нет вообще — автоматике там ловить нечего.
 
 ### Рельс 2 — MIA / перевод MDL с ручным подтверждением
 
@@ -413,11 +449,14 @@ boost_kb → manual:<id> → keyboards.manual_pitch(id): шаги MIA + тап-�
         → каждому админу: сумма, район и цена объявления, **номер телефона плательщика**
           (row.phone с объявления — именно его банк покажет в выписке), комментарий-референс
           «Boost #id», boost_id + кнопки manapp:<boost_id> / manrej:<boost_id>
-        → manapp → boosts.status='manual', boost_listing(days),
+        → manapp → boosts.status='manual', boosts.order_ref='manual:<boost_id>', boost_listing(days),
                    payments(purpose='boost_manual', currency='MDL', amount=BOOST_MDL,
                             telegram_charge_id='manual:<boost_id>'),
                    events.boost_manual_paid, владельцу «платёж получен, топ на N дней»
         → manrej  → boosts.status='manual_rejected', владельцу «не нашли деньги, попробуй ещё раз»
+scheduler.check_manual_claims (бот-процесс, каждые 60 с):
+  manual_pending старше MANUAL_REMIND_HOURS → то же сообщение админам ещё раз,
+  не чаще одного раза на окно (дедуп = events.name='manual_remind', meta=boost_id)
 ```
 
 Весь текст платёжной инструкции собирается в одном месте — `keyboards.manual_pitch()` (плюс
@@ -436,8 +475,9 @@ boost_kb → manual:<id> → keyboards.manual_pitch(id): шаги MIA + тап-�
 
 `boostpay:<id>` → `send_invoice(currency='XTR', provider_token='', prices=[LabeledPrice('Boost', BOOST_STARS)],
 payload='boost:<id>')` → `pre_checkout_query` (всегда `ok=True`) → `message.successful_payment` →
-`boost_listing` + `boosts(status='paid')` + `payments(purpose='boost'|'boost_test', currency=sp.currency,
-stars=total_amount, telegram_charge_id=…)` + `events.boost_paid` (или `test_paid`) + отчёт админам.
+`boost_listing` + `boosts(status='paid', order_ref='tg:<telegram_payment_charge_id>')` +
+`payments(purpose='boost'|'boost_test', currency=sp.currency, stars=total_amount, telegram_charge_id=…)` +
+`events.boost_paid` (или `test_paid`) + отчёт админам.
 
 **Сколько это денег (проверено 11.10 по developer terms Telegram, §6.2.4):** вознаграждение мерчанту
 = **$0.013 за звезду**, то есть `BOOST_STARS=400` ≈ $5.20 — ровно тот же порядок, что карточный рельс.
@@ -495,11 +535,15 @@ stars=total_amount, telegram_charge_id=…)` + `events.boost_paid` (или `test
 ## 9. Двигатель выручки (`scheduler.py`)
 
 В том же процессе, что и бот: `asyncio.create_task(scheduler.run(bot))` рядом с `dp.start_polling`,
-`job.cancel()` в `finally`. Один цикл, два ритма: **каждые `CARD_TICK_SECONDS=60` с** — `apply_card_orders`
-(начисление карточных платежей) и `check_webhook_silence` (сторож), накопилось `NUDGE_INTERVAL_HOURS*3600` с — `nudge_unboosted`.
-Цикл **спит первым**, поэтому после рестарта ничего не наваливается сразу. Любое исключение внутри
-прохода ловится и **не убивает** цикл (`except asyncio.CancelledError: raise` выше общего `except` —
-иначе задача не осталась бы отменяемой). Обе задачи пишут в лог только когда реально что-то сделали.
+`job.cancel()` в `finally`. Один цикл, два ритма: **каждые `CARD_TICK_SECONDS=60` с** —
+`apply_card_orders` (начисление карточных платежей), `apply_refunds` (возвраты),
+`check_webhook_silence` (сторож) и `check_manual_claims` (напоминания о неподтверждённых переводах);
+накопилось `NUDGE_INTERVAL_HOURS*3600` с — `nudge_unboosted` (предложить Boost тем, кто не в топе)
+и `notify_expired_boosts` (предложить купить снова тем, у кого Boost закончился). Цикл **спит первым**,
+поэтому после рестарта ничего не наваливается сразу. Любое исключение внутри прохода ловится и
+**не убивает** цикл
+(`except asyncio.CancelledError: raise` выше общего `except` — иначе задача не осталась бы отменяемой).
+Каждая задача пишет в лог только когда реально что-то сделала.
 
 `nudge_unboosted(bot)`: для каждой строки из `listings_to_nudge` → владельцу ЛС с текстом
 (объявление, район, цена, просмотры) и `boost_kb` (все включённые рельсы, текст из `boost_pitch()`);
@@ -507,10 +551,27 @@ stars=total_amount, telegram_charge_id=…)` + `events.boost_paid` (или `test
 запись всё равно помечается, чтобы не долбить каждый проход. Вручную тот же проход: `/nudge`.
 
 `apply_card_orders(bot)`: читает `card_orders` (`applied=0 AND status='paid'`), для каждого —
-`boost_listing` + `boosts(status='paid')` + `payments` + флаг `applied=1` + уведомления покупателю и
-админам. Если объявление или покупатель не найдены — строка остаётся **неприменённой**, а в `events`
-летит `card_order_unmatched`: деньги не теряются, а `/stats` покажет их в `card_unapplied` как сигнал
-«разбирайся руками». Повторная доставка вебхука ничего не начисляет (флаг + `UNIQUE order_id`).
+`boost_listing` + `boosts(status='paid', order_ref='ls:<order_id>')` + `payments` + флаг `applied=1`
++ уведомления покупателю и админам. Если объявление или покупатель не найдены — строка остаётся
+**неприменённой**, а в `events` летит `card_order_unmatched`: деньги не теряются, а `/stats` покажет
+их в `card_unapplied` как сигнал «разбирайся руками». Повторная доставка вебхука ничего не начисляет
+(флаг + `UNIQUE order_id`).
+
+`apply_refunds(bot)`: `payments_refunds()` (применённый карточный заказ, у которого
+`card_orders.status` стал `refunded` или `fraudulent`, а `payments.refunded_at` ещё пуст) →
+`refunded_at=now`, `boosts.status='refunded'` по `order_ref`, и `unboost_listing` **только если**
+возвращаемый Boost был последним для этого объявления (`latest_boost_for_listing`) — иначе человек
+уже заплатил снова и снимать топ за прошлую покупку нельзя. `partial_refund` в выборку не попадает:
+остаток денег настоящий, Boost остаётся. Итог — `events.boost_refunded`, ЛС владельцу («провайдер
+сообщил о возврате… если это ошибка — /paysupport») и ЛС каждому админу со статусом «топ снят / топ не
+тронут». Идемпотентно по `refunded_at`, поэтому повторная доставка `order_refunded` безопасна.
+
+`check_manual_claims(bot)`: заявка «я перевёл» (`boosts.status='manual_pending'`) старше
+`MANUAL_REMIND_HOURS=6` ч → админам повторно уходит тот же оффер с кнопками manapp/manrej и
+`waited_hours`. Смысл: деньги по MIA уже лежат в банке, не хватает только галочки, а занятый админ
+и «клиент, который не заплатил» выглядят одинаково. Дедуп — `events` (`name='manual_remind'`,
+`meta=<boost_id>`), поэтому напоминание живёт ровно одно на окно и не заводится заново после рестарта.
+Если `BOOST_MDL` пуст (рельс выключен), задача молчит.
 
 `check_webhook_silence(bot)` — сторож кассы, нужен из-за временного публичного адреса (туннель):
 ссылка на оплату выдана **больше `SILENCE_MINUTES=15` мин назад**, а за это окно в `card_orders`
@@ -521,6 +582,13 @@ stars=total_amount, telegram_charge_id=…)` + `events.boost_paid` (или `test
 Само правило вынесено в чистую функцию `is_webhook_silent(ago_seconds, deliveries)` — её можно
 проверять без БД и без DM-рассылки (см. `deploy/test_card_rail.py`). Пока `CARD_ENABLED=False`,
 сторож молчит: выключенный рельс не может «ничего не дополучить».
+
+`notify_expired_boosts(bot)`: `boosts_that_just_expired()` — активные объявления, у которых
+`boosted_until` прошёл не больше 48 ч назад и про которые ещё не писали. Владелец получает
+«Boost закончился, объявление снова в общем списке» + `boost_pitch()` + `boost_kb`. Это самая дешёвая
+повторная продажа в проекте и единственный момент, когда ценность топа ощущается. Дедуп — `events`
+(`name='boost_expired'`, `created_at > boosted_until`): покупка нового Boost двигает `boosted_until`
+и напоминание взводится снова, отдельного флага в таблице нет.
 
 ---
 
@@ -639,6 +707,18 @@ ssh root@<IP> "sed -i 's/\r$//' /tmp/check_public.sh && bash /tmp/check_public.s
 карту симптомов (000 → поднимать туннель, 404 → рестарт `imobiliare-web`, «всё зелёное, а денег нет» →
 перерегистрировать вебхук).
 
+**Бэкап денег (один шаг, сразу после первого деплоя — до первых платежей).**
+
+```bash
+scp deploy/apply_backup.sh root@<IP>:/tmp/
+ssh root@<IP> "sed -i 's/\r$//' /tmp/apply_backup.sh && bash /tmp/apply_backup.sh"
+```
+
+Кладёт `/opt/imobiliare/backup.py` и `/etc/cron.d/imobiliare-backup` (03:00, ротация 14 дней), прогоняет
+первый снимок сразу же и печатает `integrity ok` + счётчики (`listings/payments/card_orders`) — без этой
+строки считать, что бэкап «есть», нельзя. Снимает и `.env` (права `0600`), и `photos-latest.tgz`.
+Идемпотентен: можно перезапускать. Подробности — §12.
+
 **Настройка Lemon Squeezy (частично делает человек, остальное — код):**
 
 1. Аккаунт: `lemonsqueezy.com` → Sign up (email/пароль или Google) → письмо подтверждения → ссылка.
@@ -683,8 +763,12 @@ ssh root@<IP> "sed -i 's/\r$//' /tmp/check_public.sh && bash /tmp/check_public.s
 рельсы работают.
 
 Безопасность (теперь нарушено, чинить при случае): оба сервиса идут от `root`; нужен отдельный
-`User=`; бэкапы БД отсутствуют; пароль VPS менялся (см. `ACCESS.md`), SSH-ключ не добавлен;
-`imobiliare-web` слушает только 127.0.0.1 и наружу не смотрит.
+`User=` (вместе с ним починятся права `.env`, сейчас файл читается всеми); вход по ключу с рабочей
+машины **настроен и проверен** (`ssh -o BatchMode=yes` проходит, `authorized_keys` непустой), но
+`PermitRootLogin yes` + `PasswordAuthentication yes` на порту 22 = root с паролем снаружи (чинит
+`deploy/harden_ssh.sh`, §12); подача объявлений без rate-limit (один человек может засыпать доску);
+`imobiliare-web` слушает только 127.0.0.1 и наружу не смотрит. Бэкапы **больше не отсутствуют** —
+cron 03:00 стоит (§10, §12).
 
 ---
 
@@ -738,14 +822,20 @@ PowerShell ломает кавычки и `[`. Всегда: файл `.sh`/`.py
 
 - `deploy/test_money_path.py` — вызывает **боевой** `scheduler.nudge_unboosted`, админ получает ЛС
   с рабочей кнопкой; потом чистит `listings.nudged_at` и тестовые события;
-- **`deploy/test_card_rail.py`** — карточный путь **без аккаунта LS и без денег**: создаёт тестовое
-  объявление, подделывает `order_created` с честной HMAC-подписью, гонит его через
+- **`deploy/test_card_rail.py`** — **тест кассы без аккаунта LS и без денег** (название историческое,
+  сейчас он покрывает весь денежный путь): создаёт тестовое объявление, подделывает
+  `order_created` с честной HMAC-подписью, гонит его через
   `verify_signature` → `parse_order_event` → `store_card_order` (тупик дубля тоже проверяется) →
   `scheduler.apply_card_orders` и утверждает `boosted_until`, строку `payments` (5.0 USD,
-  `boost_card`, `is_test=0`), `boosts.status='paid'`, `stats().revenue_card` и `card_unapplied=0`,
-  плюс проверяет сторожа (`is_webhook_silent` на четырёх наборах входных данных и один проход
-  `check_webhook_silence`, который на здоровом рельсе должен вернуть `False`, то есть писать админам
-  не должен), после чего всё удаляет. Успех = `✅ CARD RAIL OK`;
+  `boost_card`, `is_test=0`), `boosts.status='paid'` + `order_ref='ls:<order_id>'`,
+  `stats().revenue_card` и `card_unapplied=0`; потом **обратную сторону денег**: `status='refunded'` →
+  `apply_refunds` снимает топ, ставит `boosts.status='refunded'`, `payments.refunded_at` и возвращает
+  `revenue_card` к прежнему значению, повторная доставка возврата = no-op, `partial_refund` не трогает
+  ничего; затем `notify_expired_boosts` (ровно одно предложение на окно истекания) и
+  `check_manual_claims` (напоминание об неподтверждённом MIA-переводе не чаще одного раза за
+  `MANUAL_REMIND_HOURS`); плюс сторож (`is_webhook_silent` на четырёх наборах входных данных и один
+  проход `check_webhook_silence`, который на здоровом рельсе должен вернуть `False`, то есть писать
+  админам не должен). После всего тест удаляет свои строки. Успех = `✅ MONEY RAIL OK`;
 - `deploy/make_demo.py` — удаляет старые ДЕМО-карточки, создаёт активную «ДЕМО» карточку на админе
   и шлёт админу настоящий Boost-оффер (все включённые кнопки). Не публикуется в канал;
 - `deploy/post_promo.py [message_id]` — пост-визитка в канал + пин; с аргументом **редактирует**
@@ -777,24 +867,52 @@ PYEOF
 При рестарте бот шлёт всем админам «✅ ChirieBot запущен и готов к работе» — это и есть health-check.
 
 ```bash
-# ручной бэкап (консистентно под WAL)
-sqlite3 /opt/imobiliare/data/imobiliare.db ".backup /opt/imobiliare/data/backup-$(date +%F).db"   # sqlite3 CLI НЕ установлен
-# поэтому так:
+# БЭКАП УЖЕ СТОИТ НА СЕРВЕРЕ (установлен 11.10): deploy/apply_backup.sh кладёт /opt/imobiliare/backup.py
+# и /etc/cron.d/imobiliare-backup (03:00), потом печатает список снимков. Ручной прогон:
+/opt/imobiliare/venv/bin/python /opt/imobiliare/backup.py
+ls -lh /opt/imobiliare/data/backups | tail        # imobiliare-YYYYmmdd-HHMMSS.db + .env + photos-latest.tgz
+```
+
+Что делает `backup.py` (и почему не «cp файла БД»): снимок через `sqlite3` backup API — единственный
+консистентный способ при WAL; затем `PRAGMA integrity_check` и счётчики строк в тот же лог; `.env`
+копируется рядом с правами `0600` (без токенов восстановление невозможно); фото — `photos-latest.tgz`;
+ротация — старые снимки старше `KEEP_DAYS=14` удаляются (вместе с их `.env`-двойниками). В cron-строке
+вывод пишется в `/var/log/imobiliare-backup.log` — туда и смотреть, если кажется, что бэкапа нет.
+Проверка на проде 11.10:
+`imobiliare-20261011-014546.db 49152 bytes | integrity ok`, cron-файл на месте.
+
+Ручной разовый снимок, если нужен «вот сейчас»:
+
+```bash
 /opt/imobiliare/venv/bin/python -c "import sqlite3;s=sqlite3.connect('/opt/imobiliare/data/imobiliare.db');\
-d=sqlite3.connect('/opt/imobiliare/data/backup.db');s.backup(d);print('ok')"
-# cron-бэкап с ротацией (строка в /etc/cron.d/imobiliare)
-0 3 * * * root /opt/imobiliare/venv/bin/python -c "import sqlite3,time;s=sqlite3.connect('/opt/imobiliare/data/imobiliare.db');\
-o='/opt/imobiliare/data/bak-%d.db'%time.time();d=sqlite3.connect(o);s.backup(d)" && find /opt/imobiliare/data -name 'bak-*.db' -mtime -14 -delete
+d=sqlite3.connect('/opt/imobiliare/data/backup.db');s.backup(d);print('ok')"   # sqlite3 CLI НЕ установлен
 ```
 
 Восстановление из бэкапа: остановить оба сервиса → положить файл на `DB_PATH` → проверить
-`select count(*) from listings/payments` → запустить.
-Фото — отдельный каталог, бэкапится `tar czf photos-$(date +%F).tgz -C /opt/imobiliare/data photos`
+`select count(*) from listings/payments` → запустить (точные команды печатает `apply_backup.sh`).
+Фото — отдельный каталог: `tar xzf /opt/imobiliare/data/backups/photos-latest.tgz -C /opt/imobiliare/data`
 (без них карточки в канале останутся, Mini App потеряет картинки; `file_id` в БД позволяют докачать).
 
 Откат кода: на сервере git нет — значит копируем нужную ревизию локально
 (`git checkout <sha> -- bot/`) и scp-ом сверху, затем рестарт.
 История коммитов и есть источник правды: `git log --oneline`.
+
+**Кто стучится в SSH.** Сервисы и `.env` живут под root, а `sshd -T` на сервере даёт
+`permitrootlogin yes` + `passwordauthentication yes` на 22 порту — то есть наружу открыт вход «root +
+пароль» для машины, которая знает BOT_TOKEN и секрет вебхука. `deploy/harden_ssh.sh` (выполнен 11.10)
+ставит fail2ban с дроп-ином `/etc/fail2ban/jail.d/imobiliare.conf`: бан 1 ч после 5 неудач за 10 мин,
+`backend = systemd`, а адрес, с которого мы сами подключаемся (`$SSH_CLIENT`), попадает в `ignoreip` —
+бан, отрезающий единственного админа, хуже отсутствующего бана. Проверено: `fail2ban-client status sshd`
+→ jail активен, 0 banned; `systemctl is-active ssh` → active. Перезапускать скрипт стоит, если
+поменялся наш внешний IP (он запишет новый в `ignoreip`).
+
+Следующий шаг (делать только с согласия владельца сервера): `bash /tmp/harden_ssh.sh
+--disable-root-password` ⇒ `PermitRootLogin prohibit-password` через
+`/etc/ssh/sshd_config.d/99-imobiliare.conf`. Скрипт сперва требует доказательство из журнала
+(`Accepted publickey for root from <наш IP>`), потом `sshd -t`, потом `reload` (не `restart` — живые
+сессии не рвутся), и печатает команду отката. Отключать пароль надо, **не закрывая текущее окно** и
+проверяя новый вход из второго: это единственная операция проекта, которая может оставить человека без
+доступа к его же VPS (спасает только консоль хостинг-провайдера).
 
 ---
 
@@ -802,7 +920,7 @@ o='/opt/imobiliare/data/bak-%d.db'%time.time();d=sqlite3.connect(o);s.backup(d)"
 
 | Команда | Действие |
 |---|---|
-| `/stats` | пользователи, объявления (активных/на модерации), Boost'ы, платежи (и число тестовых), `REAL_REVENUE Картой 💳` (+ сколько карточных заказов **не применено**), `REAL_REVENUE MDL 💰`, `REAL_REVENUE Stars ⭐` |
+| `/stats` | пользователи, объявления (активных/на модерации), Boost'ы, платежи (и число тестовых), `REAL_REVENUE Картой 💳` (+ сколько карточных заказов **не применено**), `REAL_REVENUE MDL 💰`, `REAL_REVENUE Stars ⭐` (возвраты уже вычтены из всех трёх), `Возвратов/чарджбеков`, `Переводов ждут подтверждения` — две строки «тут нужен человек» |
 | `/pending` | до 20 карточек на модерации с кнопками одобрить/отклонить |
 | `/nudge` | немедленно пройтись по двигателю выручки (сколько офферов отправлено) |
 | `/broadcast <текст>` | рассылка всем пользователям кроме админов, пауза 0.05 с, `events.broadcast` с `ok/total` |
@@ -875,6 +993,24 @@ o='/opt/imobiliare/data/bak-%d.db'%time.time();d=sqlite3.connect(o);s.backup(d)"
 - **Выручка по рельсам не суммируется в одну цифру.** `payments` хранит валюту как её прислал
   провайдер (`USD` от LS, `MDL` от перевода, `XTR` от звёзд), `/stats` печатает три отдельные строки и
   `card_unapplied`. Смешивать USD и MDL в «one revenue number» — значит врать себе в метрике.
+- **Возврат денег обязан выключить продукт, и он привязан к оплате, а не к объявлению.** `boosts.order_ref`
+  (`ls:<order_id>` / `tg:<charge_id>` / `manual:<boost_id>`) — единственное, что позволяет понять, **какой
+  именно** Boost оплатил этот заказ: без него «снять топ по возврату» превращается в «снять топ, который
+  человек мог оплатить снова». Поэтому топ снимается только если возвращаемый Boost последний
+  (`latest_boost_for_listing`), `partial_refund` не снимает ничего, а повторная доставка вебхука
+  безопасна благодаря `payments.refunded_at`. Всё это делает `apply_refunds` в том же **единственном**
+  писателе денег, что и начисление (§9), — вебхук по-прежнему ничего не решает.
+- **Дедупликация напоминаний живёт в `events`, а не в памяти процесса.** Счётчики в модуле
+  (`_silence_alert_at`) после рестарта обнуляются, а обещание «не долбить админа один и тот же перевод
+  каждые 60 секунд» от перезапуска не зависит: `event_recent(name, meta, hours)` + запись
+  `manual_remind`/`boost_expired`. Для `boost_expired` роль метки играет сам `boosted_until` — покупка
+  нового Boost двигает дату, и напоминание взводится заново без отдельной колонки.
+- **Бэкап — часть продуктовой логики, а не «когда-нибудь».** `payments`/`boosts` восстановить нельзя
+  (их нет нигде, кроме этой БД), объявления — можно. Поэтому `deploy/apply_backup.sh` ставит cron 03:00,
+  снимок делается через `sqlite3` backup API (при WAL `cp` даёт рваный файл), каждый снимок проверяется
+  `PRAGMA integrity_check`, рядом кладётся `.env` (без токенов восстановление = новый бот и новый
+  вебхук) и `photos-latest.tgz`, ротация 14 дней, и **первый прогон выполняется сразу при установке**:
+  непроверенный бэкап — не бэкап.
 - **Бюджет этапа ≤ €100**, хостинг — уже оплаченный VPS (Time4VPS), домен пока не куплен.
 - **Секретов в git нет** (`.gitignore` закрывает `.env`, `ACCESS.md`, `*.db`, фото). BOT_TOKEN когда-то
   попал в три deploy-скрипта и в историю — вырезан кодом **и** переписан историей
@@ -893,11 +1029,14 @@ o='/opt/imobiliare/data/bak-%d.db'%time.time();d=sqlite3.connect(o);s.backup(d)"
 интернет** (`check_public.sh`: `/` 200, `/api/stats` 200, `POST /webhook/lemonsqueezy` 401, `/photos/` 403).
 nginx 1.24 + certbot 2.9 **установлены**, `ufw allow 'Nginx Full'` открыт, порт 80 отвечает снаружи 200 —
 не хватает только hostname с A-записью (постоянный HTTPS вместо туннеля). Карточный рельс **задеплоен и
-проверен тестом без денег** (`test_card_rail.py` → `✅ CARD RAIL OK`, включая сторожа), но
+проверен тестом без денег** (`test_card_rail.py` → `✅ MONEY RAIL OK`: начисление, возврат,
+`partial_refund`, истечение Boost, напоминание о переводе, сторож), но
 `CARD_ENABLED=False`: нет аккаунта Lemon Squeezy, поэтому кнопка «💳 Картой» клиенту ещё не видна.
 MIA-рельс задеплоен и проверен (`apply_manual.sh`): цены 100 MDL / 400 Stars, обе ветки инструкции и
 HTML-экранирование под самотестом; `PAY_PHONE`/`PAY_NAME` пустые, поэтому покупатель пока видит
-«реквизиты пришлёт модератор».
+«реквизиты пришлёт модератор». Закрыто 11.10: визитка в канале отредактирована на актуальную цену
+(`post_promo.py 4`), кнопка Mini App в меню чата поставлена кодом (`set_menu_button.py`), ежедневный
+бэкап БД+`.env`+фото стоит на cron (`apply_backup.sh`, первый снимок проверен `integrity_check`).
 
 Не сделано, по приоритету:
 
@@ -908,20 +1047,18 @@ HTML-экранирование под самотестом; `PAY_PHONE`/`PAY_NA
    не появляется (человеческий шаг, §10). Следом за ним такой же человеческий шаг — **активация
    магазина** (анкета + KYC, 1–2 рабочих дня); без неё тестовые покупки работают, настоящих денег нет,
    и есть риск отказа именно из-за «услугового» типа товара (§10 «План Б», §14).
-3. Публичный HTTPS есть, но **временный**: адрес cloudflared меняется при рестарте туннеля ⇒ после любого
-   рестарта нужны `apply_tunnel.sh` + `register_ls_webhook.py`, молчание вебхука ловит сторож
-   `check_webhook_silence` (§9). Постоянный вариант — домен + `apply_https.sh`.
-4. 0 реальных объявлений на доске — главный блокер, не код (нужно 3–5, потом 50–100).
-5. **Закреплённая пост-визитка в канале всё ещё рекламирует 50 Stars** — после паритета цен (400 ⭐) пост
-   врёт клиенту; перевыложить `deploy/post_promo.py`.
-6. Кнопка Mini App в меню бота не настроена — **не человеческий шаг**: Bot API `setChatMenuButton`,
-   `WEBAPP_URL` уже публичный.
-7. Нет бэкапов БД, сервисы от root, нет rate-limit на подачу объявлений.
-8. Нет возвратов (только `/paysupport`), нет напоминаний об истёкшем Boost, `order_refunded` не снимает
-   начисленный Boost (ручной шаг, §8).
-9. Нет реестра источников трафика (`events.start.meta` уже пишет метки — данные есть, отчёта нет).
-10. Вывод денег: LS платит на банковский счёт после верификации аккаунта (Banking); звёзды — только через
-    Fragment в GRAM; локальный эквайринг MD и «нормальный учёт» требуют ÎI/SRL — теперь это опция, а не блокер.
+3. 0 реальных объявлений на доске — главный блокер, не код (нужно 3–5, потом 50–100).
+4. Публичный HTTPS есть, но **временный**: адрес cloudflared меняется при рестарте туннеля ⇒ после любого
+   рестарта нужны `apply_tunnel.sh` + `register_ls_webhook.py` + `set_menu_button.py`, молчание вебхука
+   ловит сторож `check_webhook_silence` (§9). Постоянный вариант — домен + `apply_https.sh`.
+5. Гигиена сервера: оба сервиса работают от **root**, нет rate-limit на подачу объявлений (один человек
+   может засыпать доску), `.env` доступен широко (сервисы же от root), **SSH всё ещё принимает root по
+   паролю** (`permitrootlogin yes` + `passwordauthentication yes`) — снимается `harden_ssh.sh
+   --disable-root-password`, но это шаг владельца, а не мой (§12). fail2ban уже стоит.
+6. Нет отчёта по источникам трафика (`events.start.meta` уже пишет метки — данные есть, отчёта нет).
+7. Вывод денег: LS платит на банковский счёт после верификации аккаунта (Banking); звёзды — только через
+   Fragment в GRAM; местный эквайринг MD и «нормальный учёт» требуют ÎI/SRL — теперь это опция, а не блокер.
+   Возврат по MIA остаётся ручным (у схемы нет API отзыва перевода, §8 «Рельс 2»).
 
 ---
 
@@ -932,8 +1069,12 @@ HTML-экранирование под самотестом; `PAY_PHONE`/`PAY_NA
    или, если репозиторий потерян: код есть на сервере в `/opt/imobiliare/bot/` — забрать `scp -r`.
 3. §10 шаги 1–2 (venv + requirements).
 4. Если БД цела — просто скопировать `/opt/imobiliare/data/` и продолжить с шага 6.
-   Если БД потеряна — создать пустую (сделается при старте), затем: `deploy/seed.py` для демо-наполнения,
-   объявления владельцев придётся собирать заново.
+   Если БД потеряна, но жив сервер: самый свежий снимок в `/opt/imobiliare/data/backups/imobiliare-*.db`
+   (`ls -1 ... | tail -1`) → положить на `DB_PATH`, рядом `.env`-двойник (`<снимок>.db.env`), снять
+   `photos-latest.tgz`; точные команды печатает `deploy/apply_backup.sh` в конце установки.
+   Если потеряно и это — создать пустую (сделается при старте), затем: `deploy/seed.py` для
+   демо-наполнения, объявления владельцев придётся собирать заново, а **историю платежей восстановить
+   нельзя** (отсюда и cron-бэкап).
 5. `.env` по таблице §4; токен — из @BotFather (если потерян, `revoke` и новый), `ADMIN_IDS` — твой tg id
    (узнать: напиши боту /start, потом `select tg_id from users`), `CHANNEL_ID=@gaseste_casa`,
    `BOT_USERNAME=gaseste_casa_bot`, `BOOST_*`, `NUDGE_*`, **`PAY_PHONE`/`PAY_NAME`/`PAY_INFO`** (без них
@@ -942,8 +1083,10 @@ HTML-экранирование под самотестом; `PAY_PHONE`/`PAY_NA
    иначе все вебхуки будут отдавать 401 и деньги перестанут начисляться).
 6. §10 шаг 5 (systemd units, enable --now) + §11 проверка (`status.sh`).
 7. Если канал «потерян» (бот вылетел из админов) — вернуть админку в Telegram вручную, проверить постом.
-8. Прогнать тесты без денег (§11): `test_card_rail.py` (карта) и ручной MDL-прогон через ДЕМО-карточку,
-   затем `/nudge` — убедиться, что выручка считается по всем трём рельсам.
+8. Прогнать тесты без денег (§11): `test_card_rail.py` (весь денежный путь: начисление, возврат,
+   истечение, напоминание, сторож ⇒ `✅ MONEY RAIL OK`) и ручной MDL-прогон через ДЕМО-карточку,
+   затем `/nudge` — убедиться, что выручка считается по всем трём рельсам. На новом сервере отдельно
+   `bash /tmp/apply_backup.sh` (cron-бэкап — его на свежепокупной машине нет).
 9. Если потерян домен/сертификат: купить или восстановить A-запись → `bash /tmp/apply_https.sh <домен>` →
    `python /tmp/register_ls_webhook.py` (вебхук на новый адрес создаёт код, руками в дашборде —
    только если нет `LS_API_KEY`). Быстрый бесплатный эквивалент без домена: `bash /tmp/apply_tunnel.sh`
@@ -971,5 +1114,11 @@ HTML-экранирование под самотестом; `PAY_PHONE`/`PAY_NA
 | Публичный HTTPS | временно cloudflared quick tunnel: unit `cloudflared-tunnel`, `https://<случайное>.trycloudflare.com`, адрес меняется при рестарте. Постоянно: `apply_https.sh <домен>` (nginx + certbot) |
 | Сторож кассы | `SILENCE_MINUTES=15` (ссылка дана, доставок нет) ⇒ `events.card_webhook_silent` + ЛС админам; повтор не чаще `SILENCE_ALERT_COOLDOWN=1800` с |
 | Checkout | живёт `POST /v1/checkouts`, `expires_at` = **+3 ч** (`expires_minutes=180`), ссылка отдаётся URL-кнопкой |
-| Двигатель | нудж: после 2 дней, кулдаун 4 дня, проход каждые 6 ч; **карточный ящик — каждые 60 с** |
+| Двигатель | нудж: после 2 дней, кулдаун 4 дня, проход каждые 6 ч; **карточный ящик, возвраты, молчание кассы и напоминания о переводах — каждые `CARD_TICK_SECONDS=60` с** |
+| `order_ref` | чем оплачен Boost: **`ls:<order_id>`** (карта) / **`tg:<telegram_payment_charge_id>`** (Stars) / **`manual:<boost_id>`** (перевод). Возврат ищет строку `boosts` именно по нему — без `order_ref` возврат найти платёж не может |
+| Возврат / чарджбек | статусы заказа LS: `pending \| failed \| paid \| refunded \| partial_refund \| fraudulent`. Снимаем Boost и минусуем выручку только при `refunded` и `fraudulent`; `partial_refund` **не** трогает ни Boost, ни выручку. Топ объявления снимается только если возвращённый Boost был последним оплаченным (`latest_boost_for_listing`), иначе остался более поздний платёж |
+| Напоминание о переводе | `MANUAL_REMIND_HOURS = 6` — заявка «я перевёл» без подтверждения админа пинается админу раз в 6 ч; дедупликация живёт в `events` (`manual_remind`, `meta = boost_id`), а не в памяти процесса ⇒ переживает рестарт |
+| Истечение Boost | `notify_expired_boosts` предлагает купить Boost заново в окне **48 ч** после `boosted_until`; один раз на объявление (строка `events` с `name='boost_expired'` и `meta = boosted_until`) |
+| Бэкап | cron `03:00` ежедневно, `/opt/imobiliare/data/backups/imobiliare-<UTC>.db` + `<...>.db.env` (0600) + `photos-latest.tgz`, ротация **14 дней**, каждый снимок проходит `PRAGMA integrity_check`; лог — `/var/log/imobiliare-backup.log` |
+| SSH-защита | fail2ban, jail `sshd`: `maxretry=5`, `findtime=10m`, `bantime=1h`, `backend=systemd`, `ignoreip` = 127.0.0.1/8 + ::1 + адрес администратора; drop-in `/etc/fail2ban/jail.d/imobiliare.conf`; `PermitRootLogin prohibit-password` — **только по явному желанию** (`harden_ssh.sh --disable-root-password`) |
 | Репозиторий | `github.com/shevchenkovania-stack/gaseste_casa`, ветка `main`, пуш на каждый этап |

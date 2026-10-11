@@ -133,7 +133,7 @@ Boost = **100 MDL через MIA** (мгновенный перевод по н�
 5–10 продаж в неделю, MIA остаётся запасным, а основной становится карта.
 
 ## Метрики (уже пишет бот/веб)
-events: `start` (meta = метка источника), `listing_created`, `moderation_approve`, `channel_post` (meta = id постов в канале), `web_view`, `web_contact`, `boost_click`, `boost_nudge`, `boost_payment_attempt`, `boost_paid`, `manual_click`, `manual_payment_claim`, `boost_manual_paid`, **`card_click`, `card_checkout` (meta = id checkout'а), `boost_card_paid` (meta = order id + сумма), `card_order_unmatched`, `card_webhook_silent`**, `broadcast`.
+events: `start` (meta = метка источника), `listing_created`, `moderation_approve`, `channel_post` (meta = id постов в канале), `web_view`, `web_contact`, `boost_click`, `boost_nudge`, `boost_payment_attempt`, `boost_paid`, `manual_click`, `manual_payment_claim`, `boost_manual_paid`, **`card_click`, `card_checkout` (meta = id checkout'а), `boost_card_paid` (meta = order id + сумма), `card_order_unmatched`, `card_webhook_silent`**, **`boost_refunded` (meta = order id + сумма + статус), `manual_remind` (meta = boost_id), `boost_expired` (meta = boosted_until)**, `broadcast`.
 Воронка первого платежа: объявления → boost_nudge (мы предложили) → boost_click (владелец понял?) →
 дальше две ветки: **MIA** `manual_click` (выбрал перевод?) → `manual_payment_claim` (нажал «Я перевёл»?) →
 `boost_manual_paid` (админ нашёл деньги в выписке?); **карта** `card_click` → `card_checkout` (ссылку дал?) →
@@ -142,8 +142,11 @@ events: `start` (meta = метка источника), `listing_created`, `mode
 `card_checkout`, но нет `boost_card_paid` — вебхук не доходит: на туннельной схеме почти всегда это
 сменившийся адрес (перезапустить `apply_tunnel.sh` и пересохранить URL в LS), реже TLS/секрет;
 смотри `card_unapplied` и `journalctl -u imobiliare-web` (401 = подпись не сходится, пустой журнал =
-до нас вообще не стучались). Если `manual_payment_claim` есть, а `boost_manual_paid` нет неделю — клиент
-перевёл, а мы не посмотрели в банк: это не баг, это пропущенная продажа.
+до нас вообще не стучались). Если `manual_payment_claim` есть, а `boost_manual_paid` нет — клиент
+перевёл, а мы не посмотрели в банк: бот сам напоминает админу раз в `MANUAL_REMIND_HOURS=6` ч
+(`manual_remind`), но галочку всё равно ставит человек — это пропущенная продажа, а не баг.
+Отдельно `boost_expired`: человек уже платил, и это единственная точка, где повторная продажа продаёт
+сама — после истечения Boost бот предлагает купить снова. Считать `boost_expired → boost_click` — это метрика «продукт сработал или нет».
 
 ## Почему именно эти способы (проверено 11.10 по официальным документам)
 Отвечает на вопрос «почему не что-то более современное». Полная таблица и источники — RUNBOOK §8
